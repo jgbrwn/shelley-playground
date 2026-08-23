@@ -30,13 +30,17 @@ type Event struct {
 
 // Run is a single in-flight (or finished) deploy pipeline.
 type Run struct {
-	ID         int64
-	VMName     string
-	Image      string
-	ProjectDir string
-	Port       int  // app port on dst; 0 = no specific port handling
-	MakePublic bool // share the VM publicly after deploy
-	DryRun     bool
+	ID             int64
+	VMName         string
+	Image          string
+	ProjectDir     string
+	Port           int  // app port on dst; 0 = no specific port handling
+	MakePublic     bool // share the VM publicly after deploy
+	DryRun         bool
+	FullClone      bool   // full src→dst state diff (apt/pip/npm wholesale); default is minimal/project-scoped
+	SourceOS       string // e.g. "linux/amd64", "darwin/arm64" — gates FullClone
+	Report         *ProjectReport
+	MarkdownReport string // copy-pastable dependency report (dry runs)
 
 	// VMCreated is set once `new` has succeeded; failure UI should only
 	// offer "delete the VM" when this is true.
@@ -114,7 +118,7 @@ func (m *Manager) Current() *Run {
 
 // Start launches a new deploy pipeline. It fails if another run is active or
 // the parameters are invalid.
-func (m *Manager) Start(apiKey, vmName, image, projectDir string, port int, makePublic, dryRun bool) (*Run, error) {
+func (m *Manager) Start(apiKey, vmName, image, projectDir string, port int, makePublic, dryRun, fullClone bool) (*Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.current != nil {
@@ -133,6 +137,13 @@ func (m *Manager) Start(apiKey, vmName, image, projectDir string, port int, make
 	if err != nil {
 		return nil, err
 	}
+	if fullClone && !FullCloneSupported() {
+		return nil, fmt.Errorf("full state clone requires a debian/ubuntu amd64 source VM; this host is %s", SourceOSLabel())
+	}
+	rep, err := AnalyzeProject(abs)
+	if err != nil {
+		return nil, fmt.Errorf("analyzing project: %w", err)
+	}
 	run := &Run{
 		VMName:     vmName,
 		Image:      strings.TrimSpace(image),
@@ -140,6 +151,9 @@ func (m *Manager) Start(apiKey, vmName, image, projectDir string, port int, make
 		Port:       port,
 		MakePublic: makePublic,
 		DryRun:     dryRun,
+		FullClone:  fullClone,
+		SourceOS:   SourceOSLabel(),
+		Report:     rep,
 		status:     "running",
 		done:       make(chan struct{}),
 	}
