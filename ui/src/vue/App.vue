@@ -70,6 +70,7 @@
           :models-refresh-trigger="modelsRefreshTrigger"
           :cwd-sync-trigger="cwdSyncTrigger"
           :on-open-models-modal="() => (modelsModalOpen = true)"
+          :on-open-deploy-modal="() => (deployModalOpen = true)"
           :on-open-file-finder="openFileFinder"
           :on-open-command-palette="() => (commandPaletteOpen = true)"
           :ephemeral-terminals="ephemeralTerminals"
@@ -167,6 +168,12 @@
             commandPaletteOpen = false;
           }
         "
+        @open-deploy-modal="
+          () => {
+            deployModalOpen = true;
+            commandPaletteOpen = false;
+          }
+        "
         @next-conversation="navigateToNextConversation"
         @previous-conversation="navigateToPreviousConversation"
         @next-user-message="navigateToNextUserMessage"
@@ -230,6 +237,17 @@
         "
       />
 
+      <DeployModal
+        :is-open="deployModalOpen"
+        :suggested-dir="mostRecentCwd ?? undefined"
+        @close="
+          () => {
+            deployModalOpen = false;
+            focusMessageInputIfUnfocused();
+          }
+        "
+      />
+
       <FileFinderModal
         :is-open="fileFinderOpen"
         :initial-dir="finderDir"
@@ -270,6 +288,7 @@ import IntegrationsModal from "./components/IntegrationsModal.vue";
 import NotificationsModal from "./components/NotificationsModal.vue";
 import FeatureFlagsModal from "./components/FeatureFlagsModal.vue";
 import FaviconEmojiPicker from "./components/FaviconEmojiPicker.vue";
+import DeployModal from "./components/DeployModal.vue";
 import FileFinderModal from "./components/FileFinderModal.vue";
 import EditableFileModal from "./components/EditableFileModal.vue";
 import Button from "primevue/button";
@@ -386,6 +405,7 @@ const integrationsModalOpen = ref(false);
 const notificationsModalOpen = ref(false);
 const featureFlagsModalOpen = ref(false);
 const faviconEmojiPickerOpen = ref(false);
+const deployModalOpen = ref(false);
 // Fuzzy file finder (Cmd/Ctrl+P) + the generic editor it opens.
 const fileFinderOpen = ref(false);
 const editorFilePath = ref<string | null>(null);
