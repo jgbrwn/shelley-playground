@@ -1594,6 +1594,16 @@ export interface DeploySettings {
   default_image: string;
   deploy_running: boolean;
   detected_app_ports?: number[];
+  source_os?: string;
+  full_clone_supported?: boolean;
+}
+
+export interface ProjectReport {
+  dir: string;
+  languages: { name: string; manager: string; manifest: string; version?: string }[];
+  system_packages: string[];
+  executables: string[];
+  notes: string[];
 }
 
 export interface DeployEvent {
@@ -1610,6 +1620,7 @@ export interface DeployStartRequest {
   port?: number;
   make_public?: boolean;
   dry_run: boolean;
+  full_clone?: boolean;
   api_key?: string;
 }
 
@@ -1636,6 +1647,12 @@ class DeployApi {
       body: JSON.stringify(req),
     });
     await this.throwIfNotOk(response, "Failed to start deploy");
+    return response.json();
+  }
+
+  async analyze(dir: string): Promise<{ report: ProjectReport; markdown: string }> {
+    const response = await fetch(`/api/deploy/analyze?dir=${encodeURIComponent(dir)}`);
+    await this.throwIfNotOk(response, "Failed to analyze project");
     return response.json();
   }
 
