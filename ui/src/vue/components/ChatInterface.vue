@@ -84,6 +84,7 @@
           @edit-file="props.onOpenFileFinder?.()"
           @open-mcp-servers="props.onOpenMcpServersModal?.()"
           @check-version="openVersionModal"
+          @open-deploy-modal="props.onOpenDeployModal?.()"
         />
       </div>
     </div>
@@ -687,6 +688,7 @@ const props = withDefaults(
     cwdSyncTrigger?: number;
     onOpenModelsModal?: () => void;
     onOpenMcpServersModal?: () => void;
+    onOpenDeployModal?: () => void;
     onOpenFileFinder?: () => void;
     onOpenCommandPalette?: () => void;
     ephemeralTerminals: EphemeralTerminal[];
