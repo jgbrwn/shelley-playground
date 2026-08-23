@@ -23,6 +23,7 @@ func (s *Server) RegisterDeployRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/deploy", http.HandlerFunc(s.handleDeployStart))
 	mux.Handle("GET /api/deploy/current", http.HandlerFunc(s.handleDeployCurrent))
 	mux.Handle("POST /api/deploy/cancel", http.HandlerFunc(s.handleDeployCancel))
+	mux.Handle("POST /api/deploy/delete-vm", http.HandlerFunc(s.handleDeployDeleteVM))
 }
 
 // handleDeployGetSettings returns the masked saved API key.
@@ -89,6 +90,8 @@ func (s *Server) handleDeployStart(w http.ResponseWriter, r *http.Request) {
 		VMName     string `json:"vm_name"`
 		Image      string `json:"image"`
 		ProjectDir string `json:"project_dir"`
+		Port       int    `json:"port"` // 0 = no specific port handling
+		MakePublic bool   `json:"make_public"`
 		DryRun     bool   `json:"dry_run"`
 		APIKey     string `json:"api_key"` // optional; falls back to saved key
 	}
@@ -110,7 +113,7 @@ func (s *Server) handleDeployStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := s.deployManager.Start(apiKey, req.VMName, req.Image, req.ProjectDir, req.DryRun)
+	run, err := s.deployManager.Start(apiKey, req.VMName, req.Image, req.ProjectDir, req.Port, req.MakePublic, req.DryRun)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -182,7 +185,13 @@ func (s *Server) handleDeployCurrent(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-run.Done():
-			final := map[string]any{"type": "finished", "status": run.Status(), "error": run.ErrMsg()}
+			final := map[string]any{
+				"type":       "finished",
+				"status":     run.Status(),
+				"error":      run.ErrMsg(),
+				"vm_name":    run.VMName,
+				"vm_created": run.VMCreated,
+			}
 			if !writeEvent(final) {
 				return
 			}
@@ -210,3 +219,47 @@ func (s *Server) handleDeployCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 var _ = db.Tx{} // keep import if unused elsewhere
+
+// conversationCwdHint returns the most recent conversation's working directory
+// (used to prefill the project dir / detect the app port), or "".
+func (s *Server) conversationCwdHint() string {
+	convs, err := s.db.ListConversations(context.Background(), 1, 0)
+	if err != nil || len(convs) == 0 || convs[0].Cwd == nil {
+		return ""
+	}
+	return *convs[0].Cwd
+}
+
+// handleDeployDeleteVM deletes a VM that was created by a failed deploy.
+// Requires an API key (saved or provided) with the rm permission.
+func (s *Server) handleDeployDeleteVM(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		VMName string `json:"vm_name"`
+		APIKey string `json:"api_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.VMName == "" {
+		http.Error(w, "vm_name is required", http.StatusBadRequest)
+		return
+	}
+	apiKey := strings.TrimSpace(req.APIKey)
+	if apiKey == "" {
+		saved, err := s.getDeployAPIKey(r.Context())
+		if err != nil || saved == "" {
+			http.Error(w, "no exe.dev API key saved; provide one in the modal first", http.StatusBadRequest)
+			return
+		}
+		apiKey = saved
+	}
+	c := deploy.NewExecClient(apiKey)
+	if err := c.DeleteVM(r.Context(), req.VMName); err != nil {
+		s.logger.Error("deploy delete-vm failed", "vm", req.VMName, "error", err)
+		http.Error(w, fmt.Sprintf("delete failed: %v", err), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
