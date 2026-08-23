@@ -41,7 +41,17 @@ func (r *Run) pipeline(c *execClient) {
 		if r.MakePublic {
 			r.emit("info", "plan", "Would share the VM publicly (share set-public)")
 		}
-		r.emit("info", "plan", "Would reconcile packages/services/users by diffing src vs dst state")
+		if r.FullClone && FullCloneSupported() {
+			r.emit("info", "plan", "Would run FULL state clone (all apt/pip/npm packages diffed src→dst).")
+		} else {
+			mode := "MINIMAL (project-scoped)"
+			if r.FullClone {
+				mode = "minimal (project-scoped) — full clone unavailable on this host (" + SourceOSLabel() + ")"
+			}
+			r.emitf("info", "plan", "State reconciliation would be %s.", mode)
+		}
+		// Dependency report — always generated.
+		r.emitDependencyReport()
 		status = "success"
 		return
 	}
@@ -140,6 +150,33 @@ func (r *Run) pipeline(c *execClient) {
 	r.emit("success", "done", "Deploy complete! 🎉")
 	r.emitf("info", "done", "Your app should be available at %s", url)
 	status = "success"
+}
+
+// emitDependencyReport prints what AnalyzeProject found for the project.
+func (r *Run) emitDependencyReport() {
+	rep := r.Report
+	if rep == nil {
+		return
+	}
+	if len(rep.Languages) == 0 {
+		r.emit("info", "report", "No languages/manifests detected in the project directory.")
+	} else {
+		for _, l := range rep.Languages {
+			r.emitf("info", "report", "%s via %s (from %s)", l.Name, l.Manager, l.Manifest)
+		}
+	}
+	if len(rep.SystemPackages) > 0 {
+		r.emitf("info", "report", "System packages needed on destination: %s", strings.Join(rep.SystemPackages, ", "))
+	} else {
+		r.emit("info", "report", "No extra system packages detected.")
+	}
+	for _, e := range rep.Executables {
+		r.emitf("info", "report", "Built executable: %s (libs will be checked on destination)", e)
+	}
+	for _, n := range rep.Notes {
+		r.emitf("info", "report", "Note: %s", n)
+	}
+	r.MarkdownReport = BuildMarkdownReport(rep)
 }
 
 // isTimeoutErr recognizes the /exec 504 (30s limit) and client timeouts; both
