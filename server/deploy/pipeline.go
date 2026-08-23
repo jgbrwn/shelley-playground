@@ -35,6 +35,7 @@ func (r *Run) pipeline(c *execClient) {
 		r.emit("warn", "dry-run", "Dry run: stopping before VM creation.")
 		r.emitf("info", "plan", "Would create VM %q (image: %s)", r.VMName, imageLabel(r.Image))
 		r.emitf("info", "plan", "Would rsync %s → same absolute path on the new VM", r.ProjectDir)
+		r.emitf("info", "plan", "Would install project dependencies on destination (%s)", depInstallPlan(r.Report))
 		if r.Port != 0 {
 			r.emitf("info", "plan", "Would route the VM's proxy to app port %d and configure services for it", r.Port)
 		}
@@ -196,6 +197,45 @@ func imageLabel(image string) string {
 		return "default exeuntu"
 	}
 	return image
+}
+
+// depInstallPlan summarizes the dependency-install commands that would run
+// on the destination, for display in the dry-run plan.
+func depInstallPlan(rep *ProjectReport) string {
+	if rep == nil || len(rep.Languages) == 0 {
+		return "none detected"
+	}
+	var parts []string
+	for _, lang := range rep.Languages {
+		switch {
+		case lang.Name == "python" && lang.Manager == "uv":
+			parts = append(parts, "uv sync")
+		case lang.Name == "python":
+			parts = append(parts, "pip install")
+		case lang.Name == "node" && lang.Manager == "pnpm":
+			parts = append(parts, "pnpm install")
+		case lang.Name == "node" && lang.Manager == "yarn":
+			parts = append(parts, "yarn install")
+		case lang.Name == "node":
+			parts = append(parts, "npm install")
+		case lang.Name == "go":
+			parts = append(parts, "go build")
+		case lang.Name == "rust":
+			parts = append(parts, "cargo build")
+		case lang.Name == "ruby":
+			parts = append(parts, "bundle install")
+		case lang.Name == "php":
+			parts = append(parts, "composer install")
+		case lang.Name == "java" && lang.Manager == "maven":
+			parts = append(parts, "mvn install")
+		case lang.Name == "java" && lang.Manager == "gradle":
+			parts = append(parts, "gradle build")
+		}
+	}
+	if len(parts) == 0 {
+		return "none detected"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // createVM creates the VM and installs our SSH key via a follow-up API call.
