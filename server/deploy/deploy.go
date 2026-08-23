@@ -34,7 +34,13 @@ type Run struct {
 	VMName     string
 	Image      string
 	ProjectDir string
+	Port       int  // app port on dst; 0 = no specific port handling
+	MakePublic bool // share the VM publicly after deploy
 	DryRun     bool
+
+	// VMCreated is set once `new` has succeeded; failure UI should only
+	// offer "delete the VM" when this is true.
+	VMCreated bool
 
 	status     string // running|success|failed
 	errMsg     string
@@ -108,7 +114,7 @@ func (m *Manager) Current() *Run {
 
 // Start launches a new deploy pipeline. It fails if another run is active or
 // the parameters are invalid.
-func (m *Manager) Start(apiKey, vmName, image, projectDir string, dryRun bool) (*Run, error) {
+func (m *Manager) Start(apiKey, vmName, image, projectDir string, port int, makePublic, dryRun bool) (*Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.current != nil {
@@ -120,6 +126,9 @@ func (m *Manager) Start(apiKey, vmName, image, projectDir string, dryRun bool) (
 	if err := ValidateVMName(vmName); err != nil {
 		return nil, err
 	}
+	if port != 0 && (port < 3000 || port > 9999) {
+		return nil, fmt.Errorf("app port must be between 3000 and 9999 (the proxied range), or empty")
+	}
 	abs, err := validateProjectDir(projectDir)
 	if err != nil {
 		return nil, err
@@ -128,6 +137,8 @@ func (m *Manager) Start(apiKey, vmName, image, projectDir string, dryRun bool) (
 		VMName:     vmName,
 		Image:      strings.TrimSpace(image),
 		ProjectDir: abs,
+		Port:       port,
+		MakePublic: makePublic,
 		DryRun:     dryRun,
 		status:     "running",
 		done:       make(chan struct{}),
@@ -166,6 +177,19 @@ func (r *Run) Done() <-chan struct{} { return r.done }
 
 // SnapshotEvents returns a copy of all events so far.
 func (r *Run) SnapshotEvents() []Event { return r.snapshot() }
+
+// DetectAppPortsForUI finds listening ports belonging to processes whose cwd
+// is inside the given directory (the app we'd be forklifting). Used to
+// prefill the modal's port field. Returns nil when nothing detected.
+func DetectAppPortsForUI(_ context.Context, projectDir string) []int {
+	if projectDir == "" {
+		return nil
+	}
+	if info, err := os.Stat(projectDir); err != nil || !info.IsDir() {
+		return nil
+	}
+	return detectListeningAppPorts(projectDir)
+}
 
 // Cancel requests cancellation of an in-flight run. The pipeline checks this
 // between steps and kills child processes on stop.
