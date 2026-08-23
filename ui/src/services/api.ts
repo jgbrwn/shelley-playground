@@ -1177,6 +1177,7 @@ export interface DeploySettings {
   api_key_masked: string;
   default_image: string;
   deploy_running: boolean;
+  detected_app_ports?: number[];
 }
 
 export interface DeployEvent {
@@ -1190,6 +1191,8 @@ export interface DeployStartRequest {
   vm_name: string;
   image: string;
   project_dir: string;
+  port?: number;
+  make_public?: boolean;
   dry_run: boolean;
   api_key?: string;
 }
@@ -1218,6 +1221,15 @@ class DeployApi {
     });
     await this.throwIfNotOk(response, "Failed to start deploy");
     return response.json();
+  }
+
+  async deleteVM(vmName: string): Promise<void> {
+    const response = await fetch("/api/deploy/delete-vm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vm_name: vmName }),
+    });
+    await this.throwIfNotOk(response, "Failed to delete VM");
   }
 
   async cancel(): Promise<void> {
