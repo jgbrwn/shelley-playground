@@ -141,6 +141,12 @@
         <i class="pi pi-server chat-menu-icon" aria-hidden="true" />
         {{ t("mcpServers") }}
       </button>
+
+      <div class="overflow-menu-divider" />
+      <button class="overflow-menu-item" @click="onDeploy">
+        <i class="pi pi-upload chat-menu-icon" aria-hidden="true" />
+        Deploy to new exe.dev VM…
+      </button>
       <div class="overflow-menu-divider" />
       <div class="overflow-quick-controls">
         <div
@@ -362,6 +368,7 @@ const emit = defineEmits<{
   (e: "edit-file"): void;
   (e: "open-mcp-servers"): void;
   (e: "check-version"): void;
+  (e: "open-deploy-modal"): void;
 }>();
 
 const { t, locale, setLocale } = useI18n();
@@ -394,6 +401,7 @@ const onEditAgentsMd = () => (emit("edit-agents-md"), hide());
 const onEditFile = () => (emit("edit-file"), hide());
 const onMcpServers = () => (emit("open-mcp-servers"), hide());
 const onCheckVersion = () => (emit("check-version"), hide());
+const onDeploy = () => (emit("open-deploy-modal"), hide());
 function onExternalLink(url: string) {
   emit("open-external-link", url);
   hide();

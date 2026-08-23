@@ -31,6 +31,7 @@ import (
 	"shelley.exe.dev/llm"
 	"shelley.exe.dev/mcp"
 	"shelley.exe.dev/models"
+	"shelley.exe.dev/server/deploy"
 	"shelley.exe.dev/server/diskspace"
 	"shelley.exe.dev/server/notifications"
 	"shelley.exe.dev/subpub"
@@ -417,6 +418,9 @@ type Server struct {
 	// independent DBs don't share state.
 	cacheMasterSecretMu    sync.Mutex
 	cacheMasterSecretCache []byte
+
+	// deployManager owns "deploy to new exe.dev VM" runs (serialized).
+	deployManager *deploy.Manager
 }
 
 // NewServer creates a new server instance
@@ -458,6 +462,7 @@ func NewServer(database *db.DB, llmManager LLMProvider, toolSetConfig claudetool
 	s.conversationListGitCache = newConversationListGitCache()
 	s.fileListCache = newFileListCache()
 	s.integrationSkills = newIntegrationSkillCache(logger, currentIntegrationSkillDiscoverer(logger))
+	s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun
 
 	// Persistent terminal sessions live alongside the database so that they
 	// survive shelley restarts. In tests DBPath is empty; use a unique dir so
@@ -590,6 +595,9 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	api.Handle("POST /api/models/refresh", compressionHandler(http.HandlerFunc(s.handleModelRefresh)))
 	api.Handle("GET /api/models", compressionHandler(http.HandlerFunc(s.handleModels)))
 	api.HandleFunc("GET /api/tools", s.handleTools)
+
+	// Deploy-to-new-VM (forklift) API
+	s.RegisterDeployRoutes(mux)
 
 	// Version endpoints
 	mux.HandleFunc("GET /version", s.handleVersion)
