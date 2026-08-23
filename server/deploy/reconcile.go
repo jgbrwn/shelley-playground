@@ -27,12 +27,19 @@ func (r *Run) reconcileState(ctx context.Context, client *ssh.Client, target *ss
 		}
 	}
 
-	r.reconcilePackages(ctx, exe)
-	r.reconcilePythonGlobals(ctx, exe)
-	r.reconcileNpmGlobals(ctx, exe)
+	if r.FullClone {
+		r.emit("info", "state", "Full state clone enabled: diffing all packages between source and destination…")
+		r.reconcilePackages(ctx, exe)
+		r.reconcilePythonGlobals(ctx, exe)
+		r.reconcileNpmGlobals(ctx, exe)
+	} else {
+		r.emit("info", "state", "Minimal (project-scoped) mode: installing only what the project needs.")
+		r.reconcileFromReport(ctx, exe)
+	}
 	r.reconcileSystemdUnits(ctx, exe)
 	r.reconcileUsersAndGroups(ctx, exe)
 	r.reconcileCrontabs(ctx, exe)
+	r.checkExecutables(ctx, exe)
 
 	return nil
 }
@@ -436,4 +443,92 @@ func pidFromListenLine(line string) string {
 func atoiSafe(s string) int {
 	n, _ := strconv.Atoi(strings.TrimSpace(s))
 	return n
+}
+
+// reconcileFromReport installs only the system packages the analyzed project
+// needs — not the whole source VM's package list. Also handles language-level
+// deps that need a live destination (uv install path, go/cargo builds).
+func (r *Run) reconcileFromReport(ctx context.Context, exe *remoteExec) {
+	rep := r.Report
+	if rep == nil {
+		return
+	}
+	var missing []string
+	for _, pkg := range rep.SystemPackages {
+		out, err := exe.trySudo(ctx, "dpkg-query -W -f='${Status}' "+pkg+" 2>/dev/null")
+		installed := err == nil && strings.Contains(out, "install ok installed")
+		// Special case: uv isn't in older Ubuntu repos; check PATH instead.
+		if pkg == "uv" && !installed {
+			out2, err2 := exe.trySudo(ctx, "command -v uv")
+			if err2 == nil && strings.TrimSpace(out2) != "" {
+				installed = true
+			}
+		}
+		if !installed {
+			missing = append(missing, pkg)
+		}
+	}
+	if len(missing) == 0 {
+		if len(rep.SystemPackages) > 0 {
+			r.emitf("success", "apt", "All %d project package(s) already present.", len(rep.SystemPackages))
+		}
+	} else {
+		r.emitf("info", "apt", "Installing %d project package(s): %s", len(missing), strings.Join(missing, " "))
+		cmd := fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq %s", strings.Join(missing, " "))
+		out, err := exe.trySudo(ctx, cmd)
+		if err != nil {
+			r.emitf("warn", "apt", "Some installs failed: %v\n%s", err, indentBlock(tail(out)))
+			// Retry one-by-one so one bad name doesn't sink the batch.
+			for _, p := range missing {
+				if out, err := exe.trySudo(ctx, "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "+p); err != nil {
+					r.emitf("warn", "apt", "%s: %v (%s)", p, err, firstLineStr(tail(out)))
+				}
+			}
+		} else {
+			r.emitf("success", "apt", "Installed %d package(s).", len(missing))
+		}
+	}
+
+	// uv needs the standalone installer when apt can't provide it.
+	if langNeeds(rep, "python", "uv") {
+		out, err := exe.trySudo(ctx, "command -v uv || curl -LsSf https://astral.sh/uv/install.sh | sh")
+		if err != nil {
+			r.emitf("warn", "uv", "Could not ensure uv on destination: %v\n%s", err, indentBlock(tail(out)))
+		} else if strings.Contains(out, "astral") || !strings.Contains(out, "/usr") {
+			r.emit("info", "uv", "Installed uv via astral.sh installer (~/.local/bin/uv).")
+		}
+	}
+}
+
+func firstLineStr(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+func langNeeds(rep *ProjectReport, lang, mgr string) bool {
+	for _, l := range rep.Languages {
+		if l.Name == lang && l.Manager == mgr {
+			return true
+		}
+	}
+	return false
+}
+
+// checkExecutables verifies built binaries found in the project have their
+// shared libraries satisfied on dst; missing libs are reported (not guessed).
+func (r *Run) checkExecutables(ctx context.Context, exe *remoteExec) {
+	if r.Report == nil || len(r.Report.Executables) == 0 {
+		return
+	}
+	for _, e := range r.Report.Executables {
+		out, err := exe.trySudo(ctx, "ldd "+singleQuoted(e)+" 2>&1 | grep 'not found' || true")
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(out) != "" {
+			r.emitf("warn", "libs", "%s is missing shared libraries:\n%s", e, indentBlock(strings.TrimSpace(out)))
+		}
+	}
 }
