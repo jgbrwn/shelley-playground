@@ -82,6 +82,7 @@
           @edit-agents-md="showAgentsMdEditor = true"
           @edit-file="props.onOpenFileFinder?.()"
           @check-version="openVersionModal"
+          @open-deploy-modal="props.onOpenDeployModal?.()"
         />
       </div>
     </div>
@@ -625,6 +626,7 @@ const props = withDefaults(
     modelsRefreshTrigger?: number;
     cwdSyncTrigger?: number;
     onOpenModelsModal?: () => void;
+    onOpenDeployModal?: () => void;
     onOpenFileFinder?: () => void;
     onOpenCommandPalette?: () => void;
     ephemeralTerminals: EphemeralTerminal[];
