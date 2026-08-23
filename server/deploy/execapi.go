@@ -133,6 +133,31 @@ func (c *execClient) Find(ctx context.Context, name string) (*VM, error) {
 	return nil, nil
 }
 
+// DeleteVM removes a VM from the account (requires rm token permission).
+func (c *execClient) DeleteVM(ctx context.Context, vm string) error {
+	_, err := c.exec(ctx, "rm "+vm)
+	return err
+}
+
+// NewExecClient constructs a client for one-off calls outside the pipeline.
+func NewExecClient(token string) *execClient { return newExecClient(token) }
+
+// SharePort points the VM's exe.dev proxy at the given app port.
+func (c *execClient) SharePort(ctx context.Context, vm string, port int) error {
+	_, err := c.exec(ctx, fmt.Sprintf("share port %s %d", vm, port))
+	return err
+}
+
+// SetPublic toggles public access to the VM's proxy.
+func (c *execClient) SetPublic(ctx context.Context, vm string, public bool) error {
+	cmd := "share set-private " + vm
+	if public {
+		cmd = "share set-public " + vm
+	}
+	_, err := c.exec(ctx, cmd)
+	return err
+}
+
 // NewVM creates a VM. image may be empty for the default image. The SSH
 // bootstrap (installing our deploy key) happens in a follow-up API call once
 // the VM exists — see sshkeys.go / pipeline.go.
