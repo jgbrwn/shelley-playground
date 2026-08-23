@@ -74,6 +74,7 @@
           @open-mcp-servers="props.onOpenMcpServersModal?.()"
           @check-version="openVersionModal"
           @new-conversation="onNewConversationClick"
+          @open-deploy-modal="props.onOpenDeployModal?.()"
         >
           <button
             type="button"
@@ -801,6 +802,7 @@ const props = withDefaults(
     cwdSyncTrigger?: number;
     onOpenModelsModal?: () => void;
     onOpenMcpServersModal?: () => void;
+    onOpenDeployModal?: () => void;
     onOpenFileFinder?: () => void;
     onOpenCommandPalette?: () => void;
     ephemeralTerminals: EphemeralTerminal[];
