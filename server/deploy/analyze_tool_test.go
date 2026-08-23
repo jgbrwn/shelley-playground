@@ -88,3 +88,21 @@ func containsStr(list []string, s string) bool {
 	}
 	return false
 }
+
+func TestDepInstallPlan(t *testing.T) {
+	rep := &ProjectReport{
+		Languages: []LangSpec{
+			{Name: "python", Manager: "uv"},
+			{Name: "node", Manager: "npm"},
+		},
+	}
+	got := depInstallPlan(rep)
+	if got != "uv sync, npm install" {
+		t.Fatalf("got %q, want %q", got, "uv sync, npm install")
+	}
+
+	// Empty report.
+	if got := depInstallPlan(nil); got != "none detected" {
+		t.Fatalf("got %q, want %q", got, "none detected")
+	}
+}
