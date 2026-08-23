@@ -14,6 +14,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/josharian/sockpath v0.0.0-20260904222211-971ecb607ad7
 	github.com/klauspost/compress v1.20.0
+	github.com/mikesmitty/edkey v0.0.0-20170222072505-3356ea4e686a
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pkg/diff v0.0.0-20241224192749-4e6772a4315c
 	github.com/rivo/uniseg v0.4.7
