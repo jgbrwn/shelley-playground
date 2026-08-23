@@ -92,8 +92,22 @@
 
       <label class="deploy-dryrun">
         <input type="checkbox" v-model="dryRun" :disabled="running" />
-        Dry run — validate the key and show the plan without creating anything
+        Dry run — validates the key and generates the dependency report (markdown, copy-pastable) without creating anything
       </label>
+
+      <div>
+        <label class="deploy-dryrun" :class="{ 'deploy-disabled': !fullCloneSupported }"
+          :title="fullCloneSupported ? '' : `Full state clone requires a debian/ubuntu amd64 source host (this host: ${sourceOS})`">
+          <input type="checkbox" v-model="fullClone" :disabled="running || !fullCloneSupported" />
+          Full state clone — mirror ALL packages from this VM (apt/pip/npm wholesale)
+        </label>
+        <small v-if="!fullCloneSupported" class="deploy-hint">
+          Unavailable on {{ sourceOS }} — requires a debian/ubuntu amd64 source host. Minimal (project-scoped) mode will be used.
+        </small>
+        <small v-else-if="fullClone" class="deploy-hint deploy-warn-hint">
+          ⚠️ This installs every package from this playground VM onto the destination — including unrelated projects' dependencies. Minimal mode is recommended.
+        </small>
+      </div>
 
       <div v-if="formError" class="deploy-error">{{ formError }}</div>
 
@@ -137,6 +151,14 @@
         />
       </div>
     </div>
+
+    <div v-if="markdownReport" class="deploy-report">
+      <div class="deploy-report-head">
+        <span>Dependency report</span>
+        <Button label="Copy markdown" text size="small" icon="pi pi-copy" @click="copyReport" />
+      </div>
+      <pre class="deploy-report-body">{{ markdownReport }}</pre>
+    </div>
   </Modal>
 </template>
 
@@ -169,6 +191,10 @@ const events = ref<DeployEvent[]>([]);
 const finished = ref<"" | "success" | "failed">("");
 const failedVMName = ref(""); // set when a run fails after the VM was created
 const deletingVM = ref(false);
+const fullClone = ref(false);
+const fullCloneSupported = ref(true);
+const sourceOS = ref("");
+const markdownReport = ref("");
 const consoleRef = ref<HTMLElement | null>(null);
 let es: EventSource | null = null;
 
@@ -198,6 +224,8 @@ watch(
         detectedPorts.value = s.detected_app_ports;
         if (!port.value) port.value = String(s.detected_app_ports[0]);
       }
+      sourceOS.value = s.source_os ?? "";
+      fullCloneSupported.value = s.full_clone_supported ?? false;
       savedHint.value = s.api_key_masked ? "The saved key will be used unless you replace it." : "";
     } catch {
       /* settings endpoint failure shouldn't block the modal */
@@ -216,6 +244,7 @@ async function start() {
   events.value = [];
   finished.value = "";
   failedVMName.value = "";
+  markdownReport.value = "";
   try {
     // If the user typed a new key, save it first so future deploys reuse it.
     if (!useSavedKey.value && apiKey.value.trim()) {
@@ -232,6 +261,7 @@ async function start() {
       port: port.value.trim() && !isNaN(p) ? p : undefined,
       make_public: makePublic.value,
       dry_run: dryRun.value,
+      full_clone: dryRun.value || fullCloneSupported.value ? fullClone.value : false,
       api_key: "", // already persisted above when replaced
     });
     starting.value = false;
@@ -256,6 +286,7 @@ function listen() {
       }
       if (data.type === "finished") {
         finished.value = data.status;
+        if (data.markdown_report) markdownReport.value = data.markdown_report;
         if (data.status === "failed" && data.vm_created) {
           failedVMName.value = data.vm_name ?? "";
         }
@@ -322,6 +353,14 @@ function scrollConsole() {
   nextTick(() => {
     if (consoleRef.value) consoleRef.value.scrollTop = consoleRef.value.scrollHeight;
   });
+}
+
+async function copyReport() {
+  try {
+    await navigator.clipboard.writeText(markdownReport.value);
+  } catch {
+    // clipboard may be blocked; user can still select from the <pre>
+  }
 }
 
 function shortTime(t: string) {
@@ -424,6 +463,36 @@ function onClose() {
 .deploy-success .deploy-msg,
 .deploy-final.deploy-success {
   color: #4ade80;
+}
+.deploy-disabled {
+  opacity: 0.5;
+}
+.deploy-warn-hint {
+  color: var(--p-yellow-500, #eab308);
+}
+.deploy-report {
+  margin-top: 0.75rem;
+}
+.deploy-report-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  font-size: 0.85rem;
+  margin-bottom: 0.25rem;
+}
+.deploy-report-body {
+  max-height: 260px;
+  overflow: auto;
+  background: var(--p-surface-100, #f5f5f5);
+  border-radius: 6px;
+  padding: 0.6rem;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+}
+html.dark-mode .deploy-report-body,
+.deploy-report-body:deep(.dark) {
+  background: var(--p-surface-800, #27272a);
 }
 .deploy-delete-btn {
   margin-left: 0.75rem;
