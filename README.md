@@ -90,7 +90,7 @@ Every push to `main` and every nightly upstream rebase produces a release on **t
 
 ```bash
 # latest from shelley-playground (not upstream)
-curl -Lo shelley "https://github.com/jgbrwn/shelley-playground/releases/latest/download/shelley_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" && chmod +x shelley
+curl -Lo shelley "https://github.com/jgbrwn/shelley-playground/releases/latest/download/shelley-playground_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" && chmod +x shelley
 ./shelley serve
 ```
 
