@@ -24,6 +24,7 @@ func (s *Server) RegisterDeployRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/deploy/current", http.HandlerFunc(s.handleDeployCurrent))
 	mux.Handle("POST /api/deploy/cancel", http.HandlerFunc(s.handleDeployCancel))
 	mux.Handle("POST /api/deploy/delete-vm", http.HandlerFunc(s.handleDeployDeleteVM))
+	mux.Handle("GET /api/deploy/analyze", http.HandlerFunc(s.handleDeployAnalyze))
 }
 
 // handleDeployGetSettings returns the masked saved API key.
@@ -39,9 +40,32 @@ func (s *Server) handleDeployGetSettings(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"api_key_masked": masked,
-		"default_image":  deploy.DefaultImagePrefill,
-		"deploy_running": s.deployManager.Busy(),
+		"api_key_masked":       masked,
+		"default_image":        deploy.DefaultImagePrefill,
+		"deploy_running":       s.deployManager.Busy(),
+		"detected_app_ports":   deploy.DetectAppPortsForUI(r.Context(), s.conversationCwdHint()),
+		"source_os":            deploy.SourceOSLabel(),
+		"full_clone_supported": deploy.FullCloneSupported(),
+	})
+}
+
+// handleDeployAnalyze returns the dependency report for a directory without
+// starting any deploy. GET /api/deploy/analyze?dir=/path
+func (s *Server) handleDeployAnalyze(w http.ResponseWriter, r *http.Request) {
+	dir := r.URL.Query().Get("dir")
+	if dir == "" {
+		http.Error(w, "dir query parameter is required", http.StatusBadRequest)
+		return
+	}
+	rep, err := deploy.AnalyzeProject(dir)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"report":   rep,
+		"markdown": deploy.BuildMarkdownReport(rep),
 	})
 }
 
@@ -93,6 +117,7 @@ func (s *Server) handleDeployStart(w http.ResponseWriter, r *http.Request) {
 		Port       int    `json:"port"` // 0 = no specific port handling
 		MakePublic bool   `json:"make_public"`
 		DryRun     bool   `json:"dry_run"`
+		FullClone  bool   `json:"full_clone"`
 		APIKey     string `json:"api_key"` // optional; falls back to saved key
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -113,7 +138,7 @@ func (s *Server) handleDeployStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := s.deployManager.Start(apiKey, req.VMName, req.Image, req.ProjectDir, req.Port, req.MakePublic, req.DryRun)
+	run, err := s.deployManager.Start(apiKey, req.VMName, req.Image, req.ProjectDir, req.Port, req.MakePublic, req.DryRun, req.FullClone)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -186,11 +211,12 @@ func (s *Server) handleDeployCurrent(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-run.Done():
 			final := map[string]any{
-				"type":       "finished",
-				"status":     run.Status(),
-				"error":      run.ErrMsg(),
-				"vm_name":    run.VMName,
-				"vm_created": run.VMCreated,
+				"type":            "finished",
+				"status":          run.Status(),
+				"error":           run.ErrMsg(),
+				"vm_name":         run.VMName,
+				"vm_created":      run.VMCreated,
+				"markdown_report": run.MarkdownReport,
 			}
 			if !writeEvent(final) {
 				return
