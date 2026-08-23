@@ -174,7 +174,7 @@ This fork's GitHub Actions keep releases fresh without manual intervention:
   5. Generates a new `v0.N.9OCTAL` tag (same scheme as upstream) for the current HEAD, and if the tag doesn't already exist, builds UI + templates and runs **GoReleaser** to publish cross-compiled binaries (linux/darwin, amd64/arm64) directly to this repo's Releases page.
   6. On rebase conflict, the workflow **fails loudly** (no force-push) — rebase by hand via the version dialog.
 
-- **`.github/workflows/release.yml`** (mirrored from upstream) triggers on push to `main` via the `Test` workflow and is the secondary release path for manual pushes. `.goreleaser.yml` is retargeted to **`jgbrwn/shelley-playground`** (no Homebrew cask — upstream's `boldsoftware/tap` remains canonical for mainline Shelley).
+- **`.github/workflows/release.yml`** (mirrored from upstream, trimmed) triggers on push to `main` via the `Test` workflow and is the secondary release path for manual pushes. `.goreleaser.yml` is retargeted to **`jgbrwn/shelley-playground`**. The playground drops three upstream steps that don't apply to a fork: the Homebrew cask (upstream's `boldsoftware/tap` remains canonical), the headless-shell Chromium release (downloaded from upstream at build time), and the GitHub Pages version-metadata publisher.
 
 In short: if upstream ships, this fork ships the next morning, fully rebased and released. And if you push to `main` manually, the test→release chain publishes too.
 
