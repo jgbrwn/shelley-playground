@@ -63,7 +63,10 @@ jobs:
       - name: Push rebased main
         if: steps.check.outputs.rebased == 'true'
         run: |
-          git push origin HEAD:main
+          # The rebase rewrites history, so this is never a fast-forward.
+          # --force-with-lease is safe: it only succeeds if remote main hasn't
+          # changed since we fetched it (no clobbering of others' work).
+          git push --force-with-lease origin HEAD:main
 
       - name: Check if release needed
         id: release-check
