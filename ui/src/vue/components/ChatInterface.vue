@@ -73,6 +73,7 @@
           @edit-file="props.onOpenFileFinder?.()"
           @open-mcp-servers="props.onOpenMcpServersModal?.()"
           @check-version="openVersionModal"
+          @open-deploy-modal="props.onOpenDeployModal?.()"
         >
           <template v-if="isMobile" #models="{ hide }">
             <ModelPicker
@@ -843,6 +844,7 @@ const props = withDefaults(
     cwdSyncTrigger?: number;
     onOpenModelsModal?: (mode?: "manage" | "add") => void;
     onOpenMcpServersModal?: () => void;
+    onOpenDeployModal?: () => void;
     onOpenFileFinder?: () => void;
     onOpenCommandPalette?: () => void;
     ephemeralTerminals: EphemeralTerminal[];
