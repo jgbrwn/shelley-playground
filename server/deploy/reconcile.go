@@ -3,7 +3,10 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"os"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -222,6 +225,22 @@ func (r *Run) reconcileSystemdUnits(ctx context.Context, exe *remoteExec) {
 		r.emit("info", "systemd", "No custom systemd units on this VM to copy.")
 		return
 	}
+	if r.Port != 0 {
+		srcPort := detectListeningAppPorts(r.ProjectDir)
+		if len(srcPort) > 0 && !containsInt(srcPort, r.Port) {
+			r.emitf("info", "port", "Rewriting unit files from source port(s) %s to deployment port %d.",
+				intJoin(srcPort, ", "), r.Port)
+			for i := range units {
+				for _, sp := range srcPort {
+					newContent, n := replacePortInUnit(units[i].content, sp, r.Port)
+					if n > 0 {
+						units[i].content = newContent
+						r.emitf("info", "port", "Rewrote %d port reference(s) in %s (%d → %d)", n, units[i].name, sp, r.Port)
+					}
+				}
+			}
+		}
+	}
 	r.emitf("info", "systemd", "Copying %d custom systemd unit(s): %s", len(units), strings.Join(unitNames(units), ", "))
 	for _, u := range units {
 		r.installUnit(ctx, exe, u)
@@ -330,4 +349,91 @@ func (r *Run) reconcileCrontabs(ctx context.Context, exe *remoteExec) {
 	} else {
 		r.emitf("success", "cron", "Crontab installed for %s.", exedevUser)
 	}
+}
+
+// containsInt reports whether n is in list.
+func containsInt(list []int, n int) bool {
+	for _, v := range list {
+		if v == n {
+			return true
+		}
+	}
+	return false
+}
+
+func intJoin(list []int, sep string) string {
+	parts := make([]string, len(list))
+	for i, v := range list {
+		parts[i] = fmt.Sprint(v)
+	}
+	return strings.Join(parts, sep)
+}
+
+// replacePortInUnit rewrites occurrences of :port (in URLs, -addr flags,
+// --port flags, etc.) inside a unit file and returns the new content plus the
+// number of replacements.
+func replacePortInUnit(content string, from, to int) (string, int) {
+	n := 0
+	re := regexp.MustCompile(":" + fmt.Sprint(from) + "([^0-9]|$)")
+	out := re.ReplaceAllStringFunc(content, func(m string) string {
+		n++
+		return ":" + fmt.Sprint(to) + m[len(m)-1:]
+	})
+	return out, n
+}
+
+// detectListeningAppPorts finds TCP ports of processes whose cwd is inside
+// the project directory — i.e. the app we're forklifting. Returns empty if
+// nothing detected.
+func detectListeningAppPorts(projectDir string) []int {
+	out, err := runLocal("ss", "-tlnp")
+	if err != nil {
+		return nil
+	}
+	var ports []int
+	seen := map[int]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		m := listenRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		port := atoiSafe(m[1])
+		if port < 1024 || seen[port] {
+			continue
+		}
+		pid := atoiSafe(pidFromListenLine(line))
+		if pid == 0 {
+			continue
+		}
+		cwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+		if err != nil {
+			continue
+		}
+		if cwd == projectDir || strings.HasPrefix(cwd, projectDir+"/") {
+			seen[port] = true
+			ports = append(ports, port)
+		}
+	}
+	sort.Ints(ports)
+	return ports
+}
+
+var listenRe = regexp.MustCompile(`:(\d+)\s.*users:\[\("`)
+
+func pidFromListenLine(line string) string {
+	i := strings.Index(line, "pid=")
+	if i < 0 {
+		return ""
+	}
+	rest := line[i+4:]
+	j := strings.IndexAny(rest, ",)")
+	if j < 0 {
+		return rest
+	}
+	return rest[:j]
+}
+
+func atoiSafe(s string) int {
+	n, _ := strconv.Atoi(strings.TrimSpace(s))
+	return n
 }
