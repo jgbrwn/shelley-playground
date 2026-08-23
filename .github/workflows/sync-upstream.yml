@@ -1,0 +1,150 @@
+name: Sync upstream & release
+
+# Keeps shelley-playground fresh: every day at 03:00 UTC (and on demand),
+# fetch upstream boldsoftware/shelley main, rebase the playground commits
+# onto it, and publish a GitHub release with cross-compiled binaries via
+# goreleaser. If upstream hasn't moved, we still re-release when the latest
+# release tag is older than a day or missing — so the Releases page is
+# always fresh.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout playground main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/boldsoftware/shelley.git
+          else
+            git remote add upstream https://github.com/boldsoftware/shelley.git
+          fi
+          git fetch upstream main --tags --prune
+
+      - name: Check upstream state
+        id: check
+        run: |
+          set -e
+          UPSTREAM_TIP=$(git rev-parse upstream/main)
+          BASE=$(git merge-base HEAD upstream/main)
+          if [ "$UPSTREAM_TIP" = "$BASE" ]; then
+            echo "Upstream unchanged (tip=$UPSTREAM_TIP). No rebase needed."
+            echo "rebased=false" >> $GITHUB_OUTPUT
+          else
+            echo "Upstream moved: base=$BASE tip=$UPSTREAM_TIP"
+            git log --oneline --boundary HEAD...upstream/main | head -n 20
+            echo "rebased=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Rebase onto upstream/main
+        if: steps.check.outputs.rebased == 'true'
+        run: |
+          set -e
+          git rebase upstream/main
+
+      - name: Push rebased main
+        if: steps.check.outputs.rebased == 'true'
+        run: |
+          git push origin HEAD:main
+
+      - name: Check if release needed
+        id: release-check
+        run: |
+          set -e
+          # Generate the playground tag (same scheme as upstream).
+          COUNT=$(git rev-list --count HEAD)
+          SHORT_SHA=$(git rev-parse --short=6 HEAD)
+          SHA_OCTAL=$(printf '%o' "0x${SHORT_SHA}")
+          TAG="v0.${COUNT}.9${SHA_OCTAL}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          # Skip if this tag already exists (release already published).
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag $TAG already exists — skipping release."
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Tag $TAG is new — will create release."
+          fi
+
+      - name: Set up Go
+        if: steps.release-check.outputs.exists == 'false'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Set up pnpm
+        if: steps.release-check.outputs.exists == 'false'
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ui/package.json
+
+      - name: Set up Node.js
+        if: steps.release-check.outputs.exists == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Fetch embedded exe-scroll binaries
+        if: steps.release-check.outputs.exists == 'false'
+        run: python3 scripts/fetch-exe-scroll.py --all --wait 1800
+
+      - name: Build UI
+        if: steps.release-check.outputs.exists == 'false'
+        env:
+          NO_SOURCEMAPS: '1'
+        run: |
+          cd ui
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Build templates
+        if: steps.release-check.outputs.exists == 'false'
+        run: |
+          for dir in templates/*/; do
+            name=$(basename "$dir")
+            tar -czf "templates/$name.tar.gz" -C "templates/$name" --exclude='.DS_Store' .
+          done
+
+      - name: Create tag
+        if: steps.release-check.outputs.exists == 'false'
+        run: |
+          TAG="${{ steps.release-check.outputs.tag }}"
+          git tag -a "$TAG" -m "Sync upstream: $TAG"
+          git push origin "$TAG"
+
+      - name: Run GoReleaser
+        if: steps.release-check.outputs.exists == 'false'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify on conflict
+        if: failure() && steps.check.outputs.rebased == 'true'
+        run: |
+          echo "::error::Automatic rebase onto upstream/main hit conflicts. Rebase manually: git fetch upstream main && git rebase upstream/main, resolve, then push."
+          exit 1
