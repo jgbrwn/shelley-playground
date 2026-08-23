@@ -45,6 +45,27 @@
         <small class="deploy-hint">Copied (rsync) to the same path on the new VM.</small>
       </div>
 
+      <div class="deploy-field-row">
+        <div class="deploy-field">
+          <label for="deploy-port">App port</label>
+          <InputText
+            id="deploy-port"
+            v-model="port"
+            :placeholder="detectedPorts.length ? detectedPorts.join(', ') + ' detected' : '8000'"
+            :disabled="running"
+            fluid
+            :dt="inputFieldDt"
+          />
+          <small class="deploy-hint">
+            {{ portHint }}
+          </small>
+        </div>
+        <label class="deploy-public">
+          <input type="checkbox" v-model="makePublic" :disabled="running" />
+          Make Public
+        </label>
+      </div>
+
       <div class="deploy-field">
         <label for="deploy-key">exe.dev API key</label>
         <Password
@@ -102,13 +123,25 @@
         <span class="deploy-msg">{{ e.message }}</span>
       </div>
       <div v-if="finished === 'success'" class="deploy-line deploy-success deploy-final">✅ Deploy finished</div>
-      <div v-else-if="finished === 'failed'" class="deploy-line deploy-error deploy-final">❌ Deploy failed</div>
+      <div v-else-if="finished === 'failed'" class="deploy-line deploy-error deploy-final">
+        ❌ Deploy failed
+        <Button
+          v-if="failedVMName"
+          class="deploy-delete-btn"
+          :label="deletingVM ? 'Deleting…' : `Delete VM ${failedVMName}`"
+          severity="danger"
+          size="small"
+          :loading="deletingVM"
+          :disabled="deletingVM"
+          @click="deleteFailedVM"
+        />
+      </div>
     </div>
   </Modal>
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import Modal from "./Modal.vue";
 import Button from "primevue/button";
 import InputText from "primevue/inputtext";
@@ -123,6 +156,9 @@ const vmName = ref("");
 const image = ref("");
 const projectDir = ref(props.suggestedDir ?? "");
 const apiKey = ref("");
+const port = ref("");
+const makePublic = ref(false);
+const detectedPorts = ref<number[]>([]);
 const useSavedKey = ref(true);
 const maskedKey = ref("");
 const dryRun = ref(false);
@@ -131,10 +167,23 @@ const running = ref(false);
 const formError = ref("");
 const events = ref<DeployEvent[]>([]);
 const finished = ref<"" | "success" | "failed">("");
+const failedVMName = ref(""); // set when a run fails after the VM was created
+const deletingVM = ref(false);
 const consoleRef = ref<HTMLElement | null>(null);
 let es: EventSource | null = null;
 
 const savedHint = ref("");
+
+const portHint = computed(() => {
+  if (!port.value.trim()) {
+    return "Leave blank to skip proxy routing and service reconfiguration.";
+  }
+  const p = parseInt(port.value, 10);
+  if (isNaN(p) || p !== parseFloat(port.value)) return "";
+  if (p === 8000) return "Port 8000 is the exe.dev default proxy target.";
+  if (p >= 3000 && p <= 9999) return `The new VM's URL will be https://name.exe.xyz:${p}/`;
+  return "Ports 3000–9999 are supported by the exe.dev proxy.";
+});
 
 watch(
   () => props.isOpen,
@@ -145,6 +194,10 @@ watch(
       maskedKey.value = s.api_key_masked;
       image.value = s.default_image;
       if (!projectDir.value && props.suggestedDir) projectDir.value = props.suggestedDir;
+      if (s.detected_app_ports?.length) {
+        detectedPorts.value = s.detected_app_ports;
+        if (!port.value) port.value = String(s.detected_app_ports[0]);
+      }
       savedHint.value = s.api_key_masked ? "The saved key will be used unless you replace it." : "";
     } catch {
       /* settings endpoint failure shouldn't block the modal */
@@ -162,6 +215,7 @@ async function start() {
   starting.value = true;
   events.value = [];
   finished.value = "";
+  failedVMName.value = "";
   try {
     // If the user typed a new key, save it first so future deploys reuse it.
     if (!useSavedKey.value && apiKey.value.trim()) {
@@ -170,10 +224,13 @@ async function start() {
       const s = await deployApi.getSettings();
       maskedKey.value = s.api_key_masked;
     }
+    const p = parseInt(port.value, 10);
     await deployApi.start({
       vm_name: vmName.value.trim(),
       image: image.value.trim(),
       project_dir: projectDir.value.trim(),
+      port: port.value.trim() && !isNaN(p) ? p : undefined,
+      make_public: makePublic.value,
       dry_run: dryRun.value,
       api_key: "", // already persisted above when replaced
     });
@@ -199,6 +256,9 @@ function listen() {
       }
       if (data.type === "finished") {
         finished.value = data.status;
+        if (data.status === "failed" && data.vm_created) {
+          failedVMName.value = data.vm_name ?? "";
+        }
         running.value = false;
         es?.close();
         return;
@@ -230,6 +290,32 @@ async function cancel() {
 function clearConsole() {
   events.value = [];
   finished.value = "";
+  failedVMName.value = "";
+}
+
+async function deleteFailedVM() {
+  if (!failedVMName.value) return;
+  deletingVM.value = true;
+  try {
+    await deployApi.deleteVM(failedVMName.value);
+    events.value.push({
+      time: new Date().toISOString(),
+      level: "success",
+      step: "cleanup",
+      message: `VM "${failedVMName.value}" deleted.`,
+    });
+    failedVMName.value = "";
+  } catch (err) {
+    events.value.push({
+      time: new Date().toISOString(),
+      level: "error",
+      step: "cleanup",
+      message: String(err instanceof Error ? err.message : err),
+    });
+  } finally {
+    deletingVM.value = false;
+    scrollConsole();
+  }
 }
 
 function scrollConsole() {
@@ -257,6 +343,23 @@ function onClose() {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
+}
+.deploy-field-row {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+.deploy-field-row .deploy-field {
+  flex: 1;
+}
+.deploy-public {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-top: 1.4rem;
+  white-space: nowrap;
 }
 .deploy-field label {
   font-weight: 600;
@@ -321,6 +424,9 @@ function onClose() {
 .deploy-success .deploy-msg,
 .deploy-final.deploy-success {
   color: #4ade80;
+}
+.deploy-delete-btn {
+  margin-left: 0.75rem;
 }
 .deploy-cmd .deploy-msg {
   color: #93c5fd;
