@@ -1,0 +1,27 @@
+Shelley Playground
+Copyright 2026 Bold Software, Inc. and contributors — see https://github.com/boldsoftware/shelley
+Copyright 2026 jgbrwn and Shelley Playground contributors
+
+This product includes software developed by Bold Software, Inc.
+as part of the Shelley project (https://github.com/boldsoftware/shelley),
+licensed under the Apache License, Version 2.0.
+
+Shelley Playground is a fork of Shelley that adds the
+"Deploy to new exe.dev VM" forklift and related playground tooling.
+It is distributed under the same Apache License, Version 2.0.
+
+Third-party components and their licenses are tracked in the
+respective source files and in go.mod / ui/package.json.
+
+Apache License 2.0 text is available at:
+  http://www.apache.org/licenses/LICENSE-2.0
+  https://github.com/boldsoftware/shelley/blob/main/LICENSE
+
+Acknowledgements:
+- Bold Software and the Shelley authors and contributors:
+  David Crawshaw, Philip, Dani Brown, Maisem Ali, and others listed in
+  https://github.com/boldsoftware/shelley/graphs/contributors
+- exe.dev (https://exe.dev) for the VM platform and exec API
+- The exe-scroll project bundled via scripts/fetch-exe-scroll.py
+- Chromium headless-shell via chromedp/headless-shell
+- PrimeVue, Vue 3, and the rest of the UI dependency tree
