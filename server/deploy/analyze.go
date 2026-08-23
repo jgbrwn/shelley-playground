@@ -2,9 +2,11 @@ package deploy
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -36,11 +38,15 @@ var knownToolPackages = map[string]string{
 	"nginx": "nginx", "caddy": "caddy",
 	"redis-server": "redis-server", "redis-cli": "redis-tools",
 	"psql": "postgresql-client", "mysqld": "mysql-server", "sqlite3": "sqlite3",
-	"ffmpeg": "ffmpeg", "convert": "imagemagick", "curl": "curl", "wget": "wget",
+	"ffmpeg": "ffmpeg", "convert": "imagemagick", "identify": "imagemagick",
+	"curl": "curl", "wget": "wget",
 	"git": "git", "rsync": "rsync", "jq": "jq",
 	"tmux": "tmux", "htop": "htop", "vim": "vim",
 	"docker": "docker.io", "make": "build-essential", "gcc": "build-essential",
 	"g++": "build-essential", "pkg-config": "pkg-config",
+	"unzip": "unzip", "zip": "zip", "tar": "tar",
+	"ssh": "openssh-client", "scp": "openssh-client",
+	"crontab": "cron",
 }
 
 // shebangMap extracts the interpreter command from a shebang line.
@@ -143,6 +149,11 @@ func AnalyzeProject(dir string) (*ProjectReport, error) {
 		addPkg("npm")
 	}
 
+	// Makefile presence implies build-essential (make + gcc/cc toolchain).
+	if exists("Makefile") || exists("makefile") || exists("GNUmakefile") {
+		addPkg("build-essential")
+	}
+
 	if exists("go.mod") {
 		addLang(LangSpec{Name: "go", Manager: "go", Manifest: "go.mod"})
 		addPkg("golang-go")
@@ -172,8 +183,9 @@ func AnalyzeProject(dir string) (*ProjectReport, error) {
 		addPkg("default-jdk")
 	}
 
-	// --- Walk: shebangs, executables ---
+	// --- Walk: shebangs, script-body tool scans, executables ---
 	shebangSeen := map[string]bool{}
+	scriptToolSeen := map[string]bool{}
 	walkLimit := 20000
 	filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -205,10 +217,18 @@ func AnalyzeProject(dir string) (*ProjectReport, error) {
 				}
 			}
 		}
-		// Shebangs: peek at the first line of small text files.
+		// Shebangs + script-body tool scan: for small text files, peek at
+		// the first line for a shebang. If it's a shell or python script,
+		// also scan the body for invocations of known tools (ffmpeg, jq,
+		// sqlite3, etc.) so minimal-mode dep detection catches them.
 		if info.Mode().IsRegular() && info.Size() < 512*1024 {
-			if cmd := firstLineShebang(path); cmd != "" && !shebangSeen[cmd] {
+			if cmd := firstLineShebang(path); cmd != "" {
 				shebangSeen[cmd] = true
+				if isScriptInterp(cmd) {
+					for _, tool := range scanScriptTools(path) {
+						scriptToolSeen[tool] = true
+					}
+				}
 			}
 		}
 		return nil
@@ -216,6 +236,9 @@ func AnalyzeProject(dir string) (*ProjectReport, error) {
 
 	for cmd := range shebangSeen {
 		addPkg(knownToolPackages[cmd])
+	}
+	for tool := range scriptToolSeen {
+		addPkg(knownToolPackages[tool])
 	}
 	for _, exe := range rep.Executables {
 		base := strings.ToLower(filepath.Base(exe))
@@ -256,6 +279,48 @@ func isELF(path string) bool {
 	buf := make([]byte, 4)
 	n, _ := f.Read(buf)
 	return n == 4 && buf[0] == 0x7f && string(buf[1:]) == "ELF"
+}
+
+// isScriptInterp reports whether a shebang interpreter means the file is a
+// script whose body may invoke other tools (shells and python).
+func isScriptInterp(cmd string) bool {
+	switch cmd {
+	case "bash", "sh", "dash", "zsh", "ksh", "python", "python3":
+		return true
+	}
+	return false
+}
+
+// toolWordRe matches bare command invocations of known tools at the start of
+// a word boundary: `ffmpeg ...`, `$(ffmpeg ...)`, `| jq`, `ffmpeg\n`, etc.
+// It intentionally avoids matching inside paths, URLs, or variable names.
+var toolWordRe = regexp.MustCompile(`(?:^|[^\w/-])(ffmpeg|sqlite3|jq|redis-cli|redis-server|psql|mysqld|convert|identify|curl|wget|git|rsync|tmux|htop|vim|docker|make|gcc|g\+\+|pkg-config|unzip|zip|nginx|caddy|cargo|rustc|go|node|npm|pip3)\b`)
+
+// scanScriptTools reads a script file and returns the set of known tool
+// commands it invokes. Only the first 64KB is scanned; that's enough for
+// script files while keeping the walk fast.
+func scanScriptTools(path string) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	buf := make([]byte, 64*1024)
+	n, _ := io.ReadFull(f, buf)
+	if n <= 0 {
+		return nil
+	}
+	body := string(buf[:n])
+	seen := map[string]bool{}
+	for _, m := range toolWordRe.FindAllStringSubmatch(body, -1) {
+		seen[m[1]] = true
+	}
+	var out []string
+	for cmd := range seen {
+		out = append(out, cmd)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // localCommandExists reports whether a command is on PATH locally.
