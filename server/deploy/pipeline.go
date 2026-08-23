@@ -35,6 +35,12 @@ func (r *Run) pipeline(c *execClient) {
 		r.emit("warn", "dry-run", "Dry run: stopping before VM creation.")
 		r.emitf("info", "plan", "Would create VM %q (image: %s)", r.VMName, imageLabel(r.Image))
 		r.emitf("info", "plan", "Would rsync %s → same absolute path on the new VM", r.ProjectDir)
+		if r.Port != 0 {
+			r.emitf("info", "plan", "Would route the VM's proxy to app port %d and configure services for it", r.Port)
+		}
+		if r.MakePublic {
+			r.emit("info", "plan", "Would share the VM publicly (share set-public)")
+		}
 		r.emit("info", "plan", "Would reconcile packages/services/users by diffing src vs dst state")
 		status = "success"
 		return
@@ -70,7 +76,20 @@ func (r *Run) pipeline(c *execClient) {
 		return
 	}
 
+	r.VMCreated = true
 	host := r.VMName + ".exe.xyz"
+
+	// Step 4b: route the exe.dev proxy at the requested app port. Must happen
+	// before set-public so the public share targets the right port.
+	if r.Port != 0 {
+		r.emitf("info", "port", "Routing proxy for %s to app port %d…", host, r.Port)
+		if err := c.SharePort(ctx, r.VMName, r.Port); err != nil {
+			errMsg = err.Error()
+			r.emitf("error", "port", "Failed to route proxy: %v", err)
+			return
+		}
+		r.emitf("success", "port", "Proxy routed to port %d.", r.Port)
+	}
 
 	// Step 5: wait for SSH.
 	target, err := r.waitForSSH(ctx, host, privPath)
@@ -102,9 +121,24 @@ func (r *Run) pipeline(c *execClient) {
 		return
 	}
 
+	// Step 8: share publicly if requested. New VMs are private by default,
+	// so nothing to do otherwise.
+	if r.MakePublic {
+		r.emit("info", "share", "Sharing VM publicly…")
+		if err := c.SetPublic(ctx, r.VMName, true); err != nil {
+			errMsg = err.Error()
+			r.emitf("error", "share", "Failed to make public: %v", err)
+			return
+		}
+		r.emit("success", "share", "VM is now publicly accessible.")
+	}
+
 	url := "https://" + host + "/"
+	if r.Port != 0 && r.Port != 8000 {
+		url = fmt.Sprintf("https://%s:%d/", host, r.Port)
+	}
 	r.emit("success", "done", "Deploy complete! 🎉")
-	r.emitf("info", "done", "Your app should be available at %s (ports 3000-9999 are proxied automatically).", url)
+	r.emitf("info", "done", "Your app should be available at %s", url)
 	status = "success"
 }
 
@@ -189,16 +223,14 @@ func (r *Run) waitForSSH(ctx context.Context, host, privPath string) (*sshTarget
 	return nil, fmt.Errorf("SSH to %s never came up", host)
 }
 
-// finish marks the run complete and persists it.
+// finish marks the run complete.
 func (r *Run) finish(status, errMsg string) {
 	r.status = status
 	r.errMsg = errMsg
 	now := time.Now().UTC()
 	r.finishedAt = &now
-	if r.persistFn != nil {
-		r.persistFn(r)
-	}
-	if status == "failed" {
-		r.emitf("warn", "cleanup", "You can delete the partially-created VM from your exe.dev dashboard or lobby (`rm %s`).", r.VMName)
+	if status == "failed" && r.VMCreated {
+		r.emitf("warn", "cleanup",
+			"VM %q was created but the deploy failed partway. You can delete it with `rm %s` via the exe.dev API, or keep it to retry manually.", r.VMName, r.VMName)
 	}
 }
