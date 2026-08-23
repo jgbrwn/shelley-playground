@@ -174,6 +174,12 @@
         <i class="pi pi-bookmark chat-menu-icon" aria-hidden="true" />
         {{ t("bookmarklet") }}
       </a>
+
+      <div class="overflow-menu-divider" />
+      <button class="overflow-menu-item" @click="onDeploy">
+        <i class="pi pi-upload chat-menu-icon" aria-hidden="true" />
+        Deploy to new exe.dev VM…
+      </button>
       <div class="overflow-menu-divider" />
       <div class="overflow-quick-controls">
         <div
@@ -409,6 +415,7 @@ const emit = defineEmits<{
   (e: "edit-file"): void;
   (e: "open-mcp-servers"): void;
   (e: "check-version"): void;
+  (e: "open-deploy-modal"): void;
 }>();
 
 const { t, locale, setLocale } = useI18n();
@@ -450,6 +457,7 @@ function onBookmarklet() {
   triggerRef.value?.$el.focus();
   bookmarkletOpen.value = true;
 }
+const onDeploy = () => (emit("open-deploy-modal"), hide());
 function onExternalLink(url: string) {
   emit("open-external-link", url);
   hide();
