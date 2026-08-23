@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -498,6 +499,11 @@ func (r *Run) reconcileFromReport(ctx context.Context, exe *remoteExec) {
 			r.emit("info", "uv", "Installed uv via astral.sh installer (~/.local/bin/uv).")
 		}
 	}
+
+	// Install the project's own language-level dependencies on the
+	// destination. rsync excluded node_modules and venvs, so the dst has
+	// the source code but none of the installed deps. Rebuild them here.
+	r.installProjectDeps(ctx, exe)
 }
 
 func firstLineStr(s string) string {
@@ -505,6 +511,124 @@ func firstLineStr(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// installProjectDeps runs the project's own dependency install/build command
+// on the destination. rsync excluded node_modules and venvs, so the dst has
+// source code but no installed deps. This rebuilds them in-place.
+//
+// All commands run as the deploy user (not sudo) in the project directory.
+func (r *Run) installProjectDeps(ctx context.Context, exe *remoteExec) {
+	rep := r.Report
+	if rep == nil || r.ProjectDir == "" {
+		return
+	}
+	cd := "cd " + singleQuoted(r.ProjectDir)
+	for _, lang := range rep.Languages {
+		switch {
+		case lang.Name == "python" && lang.Manager == "uv":
+			r.emit("info", "deps", "Installing python dependencies (uv sync)…")
+			out, err := exe.run(ctx, cd+" && uv sync --quiet 2>&1")
+			if err != nil {
+				r.emitf("warn", "deps", "uv sync failed: %v\n%s", err, indentBlock(tail(out)))
+			} else {
+				r.emit("success", "deps", "Python dependencies installed (uv sync).")
+			}
+		case lang.Name == "python":
+			// pip: create a venv and install requirements.
+			r.emit("info", "deps", "Installing python dependencies (pip)…")
+			cmd := cd + " && python3 -m venv .venv && .venv/bin/pip install --quiet -r requirements.txt 2>&1"
+			if _, err := os.Stat(filepath.Join(r.ProjectDir, "requirements.txt")); err != nil {
+				// No requirements.txt; try pyproject.toml with pip.
+				cmd = cd + " && python3 -m venv .venv && .venv/bin/pip install --quiet . 2>&1"
+			}
+			out, err := exe.run(ctx, cmd)
+			if err != nil {
+				r.emitf("warn", "deps", "pip install failed: %v\n%s", err, indentBlock(tail(out)))
+			} else {
+				r.emit("success", "deps", "Python dependencies installed (pip).")
+			}
+		case lang.Name == "node" && lang.Manager == "pnpm":
+			r.emit("info", "deps", "Installing node dependencies (pnpm install)…")
+			out, err := exe.run(ctx, cd+" && pnpm install --frozen-lockfile 2>&1")
+			if err != nil {
+				r.emitf("warn", "deps", "pnpm install failed: %v\n%s", err, indentBlock(tail(out)))
+			} else {
+				r.emit("success", "deps", "Node dependencies installed (pnpm).")
+			}
+		case lang.Name == "node" && lang.Manager == "yarn":
+			r.emit("info", "deps", "Installing node dependencies (yarn install)…")
+			out, err := exe.run(ctx, cd+" && yarn install --frozen-lockfile 2>&1")
+			if err != nil {
+				r.emitf("warn", "deps", "yarn install failed: %v\n%s", err, indentBlock(tail(out)))
+			} else {
+				r.emit("success", "deps", "Node dependencies installed (yarn).")
+			}
+		case lang.Name == "node":
+			r.emit("info", "deps", "Installing node dependencies (npm ci)…")
+			out, err := exe.run(ctx, cd+" && npm ci 2>&1")
+			if err != nil {
+				// npm ci requires a lockfile; fall back to npm install.
+				r.emitf("info", "deps", "npm ci failed (no lockfile?), trying npm install…")
+				out, err = exe.run(ctx, cd+" && npm install 2>&1")
+				if err != nil {
+					r.emitf("warn", "deps", "npm install failed: %v\n%s", err, indentBlock(tail(out)))
+				} else {
+					r.emit("success", "deps", "Node dependencies installed (npm).")
+				}
+			} else {
+				r.emit("success", "deps", "Node dependencies installed (npm ci).")
+			}
+		case lang.Name == "go":
+			r.emit("info", "deps", "Building go project…")
+			out, err := exe.run(ctx, cd+" && go build ./... 2>&1")
+			if err != nil {
+				r.emitf("warn", "deps", "go build failed: %v\n%s", err, indentBlock(tail(out)))
+			} else {
+				r.emit("success", "deps", "Go project built.")
+			}
+		case lang.Name == "rust":
+			r.emit("info", "deps", "Building rust project…")
+			out, err := exe.run(ctx, cd+" && cargo build --release 2>&1")
+			if err != nil {
+				r.emitf("warn", "deps", "cargo build failed: %v\n%s", err, indentBlock(tail(out)))
+			} else {
+				r.emit("success", "deps", "Rust project built.")
+			}
+		case lang.Name == "ruby":
+			r.emit("info", "deps", "Installing ruby dependencies (bundle install)…")
+			out, err := exe.run(ctx, cd+" && bundle install 2>&1")
+			if err != nil {
+				r.emitf("warn", "deps", "bundle install failed: %v\n%s", err, indentBlock(tail(out)))
+			} else {
+				r.emit("success", "deps", "Ruby dependencies installed.")
+			}
+		case lang.Name == "php":
+			r.emit("info", "deps", "Installing php dependencies (composer install)…")
+			out, err := exe.run(ctx, cd+" && composer install --no-interaction 2>&1")
+			if err != nil {
+				r.emitf("warn", "deps", "composer install failed: %v\n%s", err, indentBlock(tail(out)))
+			} else {
+				r.emit("success", "deps", "PHP dependencies installed.")
+			}
+		case lang.Name == "java" && lang.Manager == "maven":
+			r.emit("info", "deps", "Building java project (mvn install)…")
+			out, err := exe.run(ctx, cd+" && mvn -q install 2>&1")
+			if err != nil {
+				r.emitf("warn", "deps", "mvn install failed: %v\n%s", err, indentBlock(tail(out)))
+			} else {
+				r.emit("success", "deps", "Java project built (maven).")
+			}
+		case lang.Name == "java" && lang.Manager == "gradle":
+			r.emit("info", "deps", "Building java project (gradle build)…")
+			out, err := exe.run(ctx, cd+" && ./gradlew build 2>&1")
+			if err != nil {
+				r.emitf("warn", "deps", "gradle build failed: %v\n%s", err, indentBlock(tail(out)))
+			} else {
+				r.emit("success", "deps", "Java project built (gradle).")
+			}
+		}
+	}
 }
 
 func langNeeds(rep *ProjectReport, lang, mgr string) bool {
