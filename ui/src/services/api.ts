@@ -1065,3 +1065,69 @@ class NotificationChannelsApi {
 }
 
 export const notificationChannelsApi = new NotificationChannelsApi();
+
+export interface DeploySettings {
+  api_key_masked: string;
+  default_image: string;
+  deploy_running: boolean;
+}
+
+export interface DeployEvent {
+  time: string;
+  level: "info" | "warn" | "error" | "success" | "cmd";
+  step: string;
+  message: string;
+}
+
+export interface DeployStartRequest {
+  vm_name: string;
+  image: string;
+  project_dir: string;
+  dry_run: boolean;
+  api_key?: string;
+}
+
+class DeployApi {
+  async getSettings(): Promise<DeploySettings> {
+    const response = await fetch("/api/deploy/settings");
+    await this.throwIfNotOk(response, "Failed to load deploy settings");
+    return response.json();
+  }
+
+  async putSettings(apiKey: string): Promise<void> {
+    const response = await fetch("/api/deploy/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+    await this.throwIfNotOk(response, "Failed to save deploy API key");
+  }
+
+  async start(req: DeployStartRequest): Promise<{ run_id: number; vm_name: string }> {
+    const response = await fetch("/api/deploy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
+    await this.throwIfNotOk(response, "Failed to start deploy");
+    return response.json();
+  }
+
+  async cancel(): Promise<void> {
+    const response = await fetch("/api/deploy/cancel", { method: "POST" });
+    await this.throwIfNotOk(response, "Failed to cancel deploy");
+  }
+
+  private async throwIfNotOk(response: Response, prefix: string): Promise<void> {
+    if (response.ok) return;
+    let detail = "";
+    try {
+      detail = (await response.text()).trim();
+    } catch {
+      // ignore
+    }
+    throw new Error(`${prefix}: ${detail || response.statusText}`);
+  }
+}
+
+export const deployApi = new DeployApi();
