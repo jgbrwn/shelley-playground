@@ -85,7 +85,7 @@
         </div>
         <small class="deploy-hint">
           Create one with
-          <code>ssh exe.dev ssh-key generate-api-key --cmds=whoami,ls,new,share,rm --exp=90d</code>.
+          <code>ssh exe.dev ssh-key generate-api-key --cmds=whoami,ls,new,share\ port,share\ set-public,rm --exp=90d</code>.
           {{ savedHint }}
         </small>
       </div>
