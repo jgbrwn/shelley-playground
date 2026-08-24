@@ -55,6 +55,10 @@ func (c *execClient) execWithBody(ctx context.Context, command, extraBody string
 		return string(body), nil
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return "", fmt.Errorf("exe.dev rejected the API key (%d): %s", resp.StatusCode, firstLine(bodyBytes))
+	case http.StatusUnprocessableEntity:
+		// 422: the command ran but returned non-zero exit. The body has the
+		// actual error output from the exe.dev CLI — surface it in full.
+		return "", fmt.Errorf("exe.dev command failed (%d) for %q: %s", resp.StatusCode, firstWord(command), strings.TrimSpace(string(bodyBytes)))
 	default:
 		return "", fmt.Errorf("exe.dev API error %d for %q: %s", resp.StatusCode, firstWord(command), firstLine(bodyBytes))
 	}
