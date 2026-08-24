@@ -38,12 +38,13 @@ The modal collects:
 |---|---|
 | **New VM name** | Lowercase letters/digits/hyphens; becomes `https://<name>.exe.xyz` |
 | **Image** | Blank = default `exeuntu`; or prefilled `ghcr.io/ryanlewis/exeslim:latest`. **Must be Ubuntu/Debian-based** — the deployer uses apt, dpkg, and systemd to reconcile packages and services on the destination. |
-| **Project directory** | Suggested from the current conversation's cwd; rsync'd to the same path on the new VM |
+| **Project directory** | Suggested from the current conversation's cwd; rsync'd to `/home/exedev/<project-name>` on the new VM (not the full source path) |
 | **App port** | Auto-detected from processes running inside the project dir; drives `share port` + systemd `:PORT` rewriting |
 | **Make Public** | Runs `share set-public` at the end; new VMs are private by default |
 | **exe.dev API key** | Stored in the Shelley settings table (`deploy_api_key`), returned to the UI only masked; validated live via `POST https://exe.dev/exec` (`whoami`) |
 | **Dry run** | Validates the key and prints the plan without creating anything |
 | **Full state clone** | Opt-in; when on, diffs **all** apt/pip/npm/systemd/users/crontabs src→dst. Off by default (= minimal/project-scoped mode, see below) |
+| **Skip systemd** | Opt-in; when checked, the deployer won't copy or create systemd units on the destination — you handle that yourself. Default is to copy/create systemd units. If a source systemd unit references the project directory, the deployer uses it (with path/port rewriting); otherwise it copies all custom units. |
 
 A live **SSE console** streams progress inside the modal. The run's events are also persisted to `deploy_runs` so the **Current run** can be reopened after a reload.
 
@@ -102,9 +103,15 @@ Most users meet Shelley for the first time on a fresh exe.dev VM where `shelley.
 
 ```bash
 # 1. Clone the playground fork
+#    IMPORTANT: the nightly CI rebase runs once per 24h, so the repo's main
+#    branch may lag upstream by up to a day. Rebase against upstream Shelley
+#    before building to avoid installing a stale fork:
 git clone https://github.com/jgbrwn/shelley-playground ~/.config/shelley/shelley-customization
 cd ~/.config/shelley/shelley-customization
-git checkout main        # the playground's customized main
+git remote add origin https://github.com/boldsoftware/shelley.git  # upstream
+#    (if 'origin' already exists, skip the add — the clone's origin IS upstream)
+git fetch origin main --tags
+git rebase origin/main main   # replay playground commits on latest upstream
 
 # 2. Build a stamped binary (requires Go, Node, pnpm, make)
 make build-custom
@@ -128,6 +135,8 @@ curl -fsS -X POST -H 'X-Shelley-Request: 1' "$SHELLEY_URL/exit?resume=true"
 ```
 
 After restart, the version dialog should show the `customized` badge and list the deploy commits.
+
+> **Why rebase before building?** The nightly sync workflow rebases `playground/main` against `boldsoftware/shelley` once per 24 hours. If you clone and build immediately after upstream ships a fix but before the nightly CI runs, you'd build a stale fork. The `git fetch origin main && git rebase origin/main` step ensures you're always on the latest upstream plus the playground commits.
 
 > **Don't** use plain `make build` for an installed binary — an unstamped binary will offer the mainline "Upgrade & Restart" path that silently discards the customizations. Always use `make build-custom` for playground builds.
 
