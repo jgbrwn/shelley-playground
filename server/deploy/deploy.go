@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -33,11 +34,13 @@ type Run struct {
 	ID             int64
 	VMName         string
 	Image          string
-	ProjectDir     string
-	Port           int  // app port on dst; 0 = no specific port handling
-	MakePublic     bool // share the VM publicly after deploy
+	ProjectDir     string // source path (on the playground VM)
+	DstProjectDir  string // destination path under /home/exedev (derived)
+	Port           int    // app port on dst; 0 = no specific port handling
+	MakePublic     bool   // share the VM publicly after deploy
 	DryRun         bool
 	FullClone      bool   // full src→dst state diff (apt/pip/npm wholesale); default is minimal/project-scoped
+	SkipSystemd    bool   // skip copying/creating systemd units on dst
 	SourceOS       string // e.g. "linux/amd64", "darwin/arm64" — gates FullClone
 	Report         *ProjectReport
 	MarkdownReport string // copy-pastable dependency report (dry runs)
@@ -118,7 +121,7 @@ func (m *Manager) Current() *Run {
 
 // Start launches a new deploy pipeline. It fails if another run is active or
 // the parameters are invalid.
-func (m *Manager) Start(apiKey, vmName, image, projectDir string, port int, makePublic, dryRun, fullClone bool) (*Run, error) {
+func (m *Manager) Start(apiKey, vmName, image, projectDir string, port int, makePublic, dryRun, fullClone, skipSystemd bool) (*Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.current != nil {
@@ -140,22 +143,25 @@ func (m *Manager) Start(apiKey, vmName, image, projectDir string, port int, make
 	if fullClone && !FullCloneSupported() {
 		return nil, fmt.Errorf("full state clone requires a debian/ubuntu amd64 source VM; this host is %s", SourceOSLabel())
 	}
-	rep, err := AnalyzeProject(abs)
+		rep, err := AnalyzeProject(abs)
 	if err != nil {
 		return nil, fmt.Errorf("analyzing project: %w", err)
 	}
+	dstDir := "/home/exedev/" + filepath.Base(abs)
 	run := &Run{
-		VMName:     vmName,
-		Image:      strings.TrimSpace(image),
-		ProjectDir: abs,
-		Port:       port,
-		MakePublic: makePublic,
-		DryRun:     dryRun,
-		FullClone:  fullClone,
-		SourceOS:   SourceOSLabel(),
-		Report:     rep,
-		status:     "running",
-		done:       make(chan struct{}),
+		VMName:        vmName,
+		Image:         strings.TrimSpace(image),
+		ProjectDir:    abs,
+		DstProjectDir: dstDir,
+		Port:          port,
+		MakePublic:    makePublic,
+		DryRun:        dryRun,
+		FullClone:     fullClone,
+		SkipSystemd:   skipSystemd,
+		SourceOS:      SourceOSLabel(),
+		Report:        rep,
+		status:        "running",
+		done:          make(chan struct{}),
 	}
 	if m.persist != nil {
 		run.persistFn = func(rr *Run) { _ = m.persist(rr) }
