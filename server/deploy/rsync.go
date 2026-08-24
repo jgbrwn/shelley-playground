@@ -19,10 +19,12 @@ var rsyncExcludes = []string{
 	".venv-backup",
 }
 
-// rsyncProject copies the project dir to the same absolute path on the dst
-// VM. venvs inside the project are excluded here and rebuilt in reconcile.
+// rsyncProject copies the project dir to /home/exedev/<basename> on the dst
+// VM (not the full source path, which may be arbitrarily deep under
+// /home/exedev/playground/...). venvs inside the project are excluded here and
+// rebuilt in reconcile.
 func (r *Run) rsyncProject(ctx context.Context, user string) error {
-	dst := path.Join(user+"@"+r.VMName+".exe.xyz:", r.ProjectDir)
+	dst := path.Join(user+"@"+r.VMName+".exe.xyz:", r.DstProjectDir)
 	args := []string{"-az", "--delete", "-e", "ssh -o StrictHostKeyChecking=accept-new -i " + mustKeyPath()}
 	for _, ex := range rsyncExcludes {
 		args = append(args, "--exclude", ex)
@@ -35,7 +37,7 @@ func (r *Run) rsyncProject(ctx context.Context, user string) error {
 		r.emitf("error", "rsync", "rsync failed: %v\n%s", res.err, indentBlock(res.stdout))
 		return fmt.Errorf("rsync: %w", res.err)
 	}
-	r.emitf("success", "rsync", "Copied %s to %s:%s", r.ProjectDir, r.VMName+".exe.xyz", r.ProjectDir)
+	r.emitf("success", "rsync", "Copied %s to %s:%s", r.ProjectDir, r.VMName+".exe.xyz", r.DstProjectDir)
 
 	// Detect python venvs we skipped so reconcile can rebuild them.
 	if venvs := findVenvs(r.ProjectDir); len(venvs) > 0 {
