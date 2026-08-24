@@ -201,4 +201,5 @@ If you contribute to this fork, you agree your contributions are Apache 2.0 as w
 - Upstream Shelley: https://github.com/boldsoftware/shelley
 - exe.dev: https://exe.dev
 - This fork: https://github.com/jgbrwn/shelley-playground
+- exeslim (default deploy image): https://github.com/ryanlewis/exeslim — a minimal exe.dev VM image by [Ryan Lewis](https://github.com/ryanlewis), pre-filled as the Deploy modal's default image
 - Shelley skill for customizing your own Shelley: search for `customizing-shelley` in the repo's `AGENTS.md`
