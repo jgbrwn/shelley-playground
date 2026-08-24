@@ -37,7 +37,7 @@ The modal collects:
 | Field | What it does |
 |---|---|
 | **New VM name** | Lowercase letters/digits/hyphens; becomes `https://<name>.exe.xyz` |
-| **Image** | Blank = default `exeuntu`; or prefilled `ghcr.io/ryanlewis/exeslim:latest`. Any image exe.dev supports works. |
+| **Image** | Blank = default `exeuntu`; or prefilled `ghcr.io/ryanlewis/exeslim:latest`. **Must be Ubuntu/Debian-based** — the deployer uses apt, dpkg, and systemd to reconcile packages and services on the destination. |
 | **Project directory** | Suggested from the current conversation's cwd; rsync'd to the same path on the new VM |
 | **App port** | Auto-detected from processes running inside the project dir; drives `share port` + systemd `:PORT` rewriting |
 | **Make Public** | Runs `share set-public` at the end; new VMs are private by default |
