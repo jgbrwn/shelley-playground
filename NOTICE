@@ -25,3 +25,6 @@ Acknowledgements:
 - The exe-scroll project bundled via scripts/fetch-exe-scroll.py
 - Chromium headless-shell via chromedp/headless-shell
 - PrimeVue, Vue 3, and the rest of the UI dependency tree
+- Ryan Lewis (https://github.com/ryanlewis) for exeslim
+  (https://github.com/ryanlewis/exeslim), the minimal exe.dev VM image used
+  as the default in the Deploy modal
