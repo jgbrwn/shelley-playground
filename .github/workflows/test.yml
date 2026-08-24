@@ -65,7 +65,7 @@ jobs:
           done
 
       - name: Fetch embedded exe-scroll
-        run: make exe-scroll
+        run: python3 scripts/fetch-exe-scroll.py --native --wait 300
 
       - name: Run Go tests
         run: go test -v ./...
