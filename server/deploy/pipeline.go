@@ -182,6 +182,32 @@ func (r *Run) emitDependencyReport() {
 	for _, n := range rep.Notes {
 		r.emitf("info", "report", "Note: %s", n)
 	}
+
+	// Systemd units: show what the deployer found on source.
+	if r.SkipSystemd {
+		r.emit("info", "report", "Systemd: skipped (declined by user).")
+	} else {
+		units := localCustomUnits()
+		if len(units) == 0 {
+			r.emit("info", "report", "Systemd: no custom units found on source; none will be created on destination.")
+		} else {
+			var projectUnits, otherUnits []string
+			for _, u := range units {
+				if strings.Contains(u.content, r.ProjectDir) {
+					projectUnits = append(projectUnits, u.name)
+				} else {
+					otherUnits = append(otherUnits, u.name)
+				}
+			}
+			if len(projectUnits) > 0 {
+				r.emitf("info", "report", "Systemd: %d project-related unit(s) found on source: %s", len(projectUnits), strings.Join(projectUnits, ", "))
+			}
+			if len(otherUnits) > 0 {
+				r.emitf("info", "report", "Systemd: %d other custom unit(s) on source (will also be copied): %s", len(otherUnits), strings.Join(otherUnits, ", "))
+			}
+		}
+	}
+
 	r.MarkdownReport = BuildMarkdownReport(rep)
 }
 
