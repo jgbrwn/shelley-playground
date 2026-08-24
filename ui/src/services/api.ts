@@ -1206,6 +1206,7 @@ export interface DeployStartRequest {
   make_public?: boolean;
   dry_run: boolean;
   full_clone?: boolean;
+  skip_systemd?: boolean;
   api_key?: string;
 }
 
