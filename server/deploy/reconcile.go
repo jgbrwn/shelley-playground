@@ -535,13 +535,16 @@ func (r *Run) installProjectDeps(ctx context.Context, exe *remoteExec) {
 				r.emit("success", "deps", "Python dependencies installed (uv sync).")
 			}
 		case lang.Name == "python":
-			// pip: create a venv and install requirements.
+			// pip: reuse an existing venv if present (idempotent); create one
+			// only if none exists. python -m venv on an existing venv can
+			// corrupt it by overwriting the interpreter symlinks without
+			// clearing stale site-packages.
 			r.emit("info", "deps", "Installing python dependencies (pip)…")
-			cmd := cd + " && python3 -m venv .venv && .venv/bin/pip install --quiet -r requirements.txt 2>&1"
-			if _, err := os.Stat(filepath.Join(r.ProjectDir, "requirements.txt")); err != nil {
-				// No requirements.txt; try pyproject.toml with pip.
-				cmd = cd + " && python3 -m venv .venv && .venv/bin/pip install --quiet . 2>&1"
+			reqFile := "requirements.txt"
+			if _, err := os.Stat(filepath.Join(r.ProjectDir, reqFile)); err != nil {
+				reqFile = "." // install from pyproject.toml
 			}
+			cmd := cd + " && [ -d .venv ] || python3 -m venv .venv && .venv/bin/pip install --quiet -r " + reqFile + " 2>&1"
 			out, err := exe.run(ctx, cmd)
 			if err != nil {
 				r.emitf("warn", "deps", "pip install failed: %v\n%s", err, indentBlock(tail(out)))
