@@ -111,13 +111,14 @@ func (s *Server) handleDeployPutSettings(w http.ResponseWriter, r *http.Request)
 // handleDeployStart begins a deploy run.
 func (s *Server) handleDeployStart(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		VMName     string `json:"vm_name"`
-		Image      string `json:"image"`
-		ProjectDir string `json:"project_dir"`
-		Port       int    `json:"port"` // 0 = no specific port handling
+		VMName      string `json:"vm_name"`
+		Image       string `json:"image"`
+		ProjectDir  string `json:"project_dir"`
+		Port        int    `json:"port"` // 0 = no specific port handling
 		MakePublic bool   `json:"make_public"`
 		DryRun     bool   `json:"dry_run"`
 		FullClone  bool   `json:"full_clone"`
+		SkipSystemd bool  `json:"skip_systemd"`
 		APIKey     string `json:"api_key"` // optional; falls back to saved key
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -138,7 +139,7 @@ func (s *Server) handleDeployStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := s.deployManager.Start(apiKey, req.VMName, req.Image, req.ProjectDir, req.Port, req.MakePublic, req.DryRun, req.FullClone)
+	run, err := s.deployManager.Start(apiKey, req.VMName, req.Image, req.ProjectDir, req.Port, req.MakePublic, req.DryRun, req.FullClone, req.SkipSystemd)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -283,7 +284,13 @@ func (s *Server) handleDeployDeleteVM(w http.ResponseWriter, r *http.Request) {
 	c := deploy.NewExecClient(apiKey)
 	if err := c.DeleteVM(r.Context(), req.VMName); err != nil {
 		s.logger.Error("deploy delete-vm failed", "vm", req.VMName, "error", err)
-		http.Error(w, fmt.Sprintf("delete failed: %v", err), http.StatusBadGateway)
+		msg := err.Error()
+		// The exe.dev API returns a permission error when the key lacks the
+		// 'rm' command. Give the user actionable guidance.
+		if strings.Contains(strings.ToLower(msg), "permission") || strings.Contains(strings.ToLower(msg), "denied") || strings.Contains(strings.ToLower(msg), "forbidden") {
+			msg = fmt.Sprintf("the API key may not have permission to delete VMs (rm). Create one with --cmds=whoami,ls,new,rm: %s", msg)
+		}
+		http.Error(w, msg, http.StatusBadGateway)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
