@@ -85,7 +85,7 @@
         </div>
         <small class="deploy-hint">
           Create one with
-          <code>ssh exe.dev ssh-key generate-api-key --cmds=whoami,ls,new --exp=90d</code>.
+          <code>ssh exe.dev ssh-key generate-api-key --cmds=whoami,ls,new,share,rm --exp=90d</code>.
           {{ savedHint }}
         </small>
       </div>
@@ -448,6 +448,16 @@ function onClose() {
   font-size: 0.78rem;
   line-height: 1.5;
 }
+/* Dark mode: ensure the console is visible on Android Chrome dark mode. */
+.dark .deploy-console {
+  background: #1a1a1a;
+  color: #d4d4d4;
+}
+/* Light mode: use a dark console even in light theme (terminal aesthetic). */
+.deploy-console {
+  background: #1a1a1a;
+  color: #d4d4d4;
+}
 .deploy-line {
   white-space: pre-wrap;
   word-break: break-word;
@@ -491,15 +501,20 @@ function onClose() {
 .deploy-report-body {
   max-height: 260px;
   overflow: auto;
-  background: var(--p-surface-100, #f5f5f5);
   border-radius: 6px;
   padding: 0.6rem;
   font-size: 0.75rem;
   white-space: pre-wrap;
 }
-html.dark-mode .deploy-report-body,
-.deploy-report-body:deep(.dark) {
+/* Light mode: light background with dark text. */
+.deploy-report-body {
+  background: var(--p-surface-100, #f5f5f5);
+  color: var(--p-text-color, #1f2937);
+}
+/* Dark mode: dark background with light text. Use .dark (not html.dark-mode). */
+.dark .deploy-report-body {
   background: var(--p-surface-800, #27272a);
+  color: var(--p-text-color, #f9fafb);
 }
 .deploy-delete-btn {
   margin-left: 0.75rem;
