@@ -42,7 +42,7 @@
           fluid
           :dt="inputFieldDt"
         />
-        <small class="deploy-hint">Copied (rsync) to the same path on the new VM.</small>
+        <small class="deploy-hint">Copied (rsync) to /home/exedev/&lt;project-name&gt; on the new VM.</small>
       </div>
 
       <div class="deploy-field-row">
@@ -99,15 +99,20 @@
         <label class="deploy-dryrun" :class="{ 'deploy-disabled': !fullCloneSupported }"
           :title="fullCloneSupported ? '' : `Full state clone requires a debian/ubuntu amd64 source host (this host: ${sourceOS})`">
           <input type="checkbox" v-model="fullClone" :disabled="running || !fullCloneSupported" />
-          Full state clone — mirror ALL packages from this VM (apt/pip/npm wholesale)
+          Full state clone — mirror ALL packages from source OS (apt/pip/npm wholesale)
         </label>
         <small v-if="!fullCloneSupported" class="deploy-hint">
           Unavailable on {{ sourceOS }} — requires a debian/ubuntu amd64 source host. Minimal (project-scoped) mode will be used.
         </small>
         <small v-else-if="fullClone" class="deploy-hint deploy-warn-hint">
-          ⚠️ This installs every package from this playground VM onto the destination — including unrelated projects' dependencies. Minimal mode is recommended.
+          ⚠️ This installs every package from this source VM onto the destination — including unrelated projects' dependencies. Minimal mode is recommended.
         </small>
       </div>
+
+      <label class="deploy-dryrun">
+        <input type="checkbox" v-model="skipSystemd" :disabled="running" />
+        Skip systemd — don't copy or create systemd units on the destination (handle it yourself)
+      </label>
 
       <div v-if="formError" class="deploy-error">{{ formError }}</div>
 
@@ -193,6 +198,7 @@ const failedVMName = ref(""); // set when a run fails after the VM was created
 const deletingVM = ref(false);
 const fullClone = ref(false);
 const fullCloneSupported = ref(true);
+const skipSystemd = ref(false);
 const sourceOS = ref("");
 const markdownReport = ref("");
 const consoleRef = ref<HTMLElement | null>(null);
@@ -262,6 +268,7 @@ async function start() {
       make_public: makePublic.value,
       dry_run: dryRun.value,
       full_clone: dryRun.value || fullCloneSupported.value ? fullClone.value : false,
+      skip_systemd: skipSystemd.value,
       api_key: "", // already persisted above when replaced
     });
     starting.value = false;
