@@ -29,7 +29,7 @@
           fluid
           :dt="inputFieldDt"
         />
-        <small class="deploy-hint">Leave blank to use the standard exeuntu image.</small>
+        <small class="deploy-hint">Leave blank for the standard exeuntu image. Must be Ubuntu/Debian-based — the deployer uses apt, dpkg, and systemd to reconcile packages and services on the destination.</small>
       </div>
 
       <div class="deploy-field">
