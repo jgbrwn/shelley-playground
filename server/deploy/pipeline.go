@@ -34,8 +34,13 @@ func (r *Run) pipeline(c *execClient) {
 	if r.DryRun {
 		r.emit("warn", "dry-run", "Dry run: stopping before VM creation.")
 		r.emitf("info", "plan", "Would create VM %q (image: %s)", r.VMName, imageLabel(r.Image))
-		r.emitf("info", "plan", "Would rsync %s → same absolute path on the new VM", r.ProjectDir)
+		r.emitf("info", "plan", "Would rsync %s → %s on the new VM", r.ProjectDir, r.DstProjectDir)
 		r.emitf("info", "plan", "Would install project dependencies on destination (%s)", depInstallPlan(r.Report))
+		if r.SkipSystemd {
+			r.emit("info", "plan", "Would skip systemd unit reconciliation (declined).")
+		} else {
+			r.emit("info", "plan", "Would copy/create systemd units on destination.")
+		}
 		if r.Port != 0 {
 			r.emitf("info", "plan", "Would route the VM's proxy to app port %d and configure services for it", r.Port)
 		}
