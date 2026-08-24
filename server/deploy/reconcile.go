@@ -37,7 +37,11 @@ func (r *Run) reconcileState(ctx context.Context, client *ssh.Client, target *ss
 		r.emit("info", "state", "Minimal (project-scoped) mode: installing only what the project needs.")
 		r.reconcileFromReport(ctx, exe)
 	}
-	r.reconcileSystemdUnits(ctx, exe)
+	if !r.SkipSystemd {
+		r.reconcileSystemdUnits(ctx, exe)
+	} else {
+		r.emit("info", "systemd", "Skipping systemd unit reconciliation (declined by user).")
+	}
 	r.reconcileUsersAndGroups(ctx, exe)
 	r.reconcileCrontabs(ctx, exe)
 	r.checkExecutables(ctx, exe)
@@ -233,6 +237,34 @@ func (r *Run) reconcileSystemdUnits(ctx context.Context, exe *remoteExec) {
 		r.emit("info", "systemd", "No custom systemd units on this VM to copy.")
 		return
 	}
+
+	// Check if any unit references the project directory; if so, prefer only
+	// those project-related units. Otherwise copy all custom units (the
+	// original behavior — useful when units aren't project-specific).
+	var selected []localUnit
+	for _, u := range units {
+		if strings.Contains(u.content, r.ProjectDir) {
+			selected = append(selected, u)
+		}
+	}
+	if len(selected) > 0 {
+		r.emitf("info", "systemd", "Found %d systemd unit(s) related to %s on source: %s",
+				len(selected), r.ProjectDir, strings.Join(unitNames(selected), ", "))
+		units = selected
+	} else {
+		r.emitf("info", "systemd", "No project-specific systemd units found on source; copying all %d custom unit(s).", len(units))
+	}
+
+	// Rewrite source project path → dst project path in unit files.
+	if r.DstProjectDir != "" && r.DstProjectDir != r.ProjectDir {
+		for i := range units {
+			if strings.Contains(units[i].content, r.ProjectDir) {
+				units[i].content = strings.ReplaceAll(units[i].content, r.ProjectDir, r.DstProjectDir)
+				r.emitf("info", "path", "Rewrote %s → %s in %s", r.ProjectDir, r.DstProjectDir, units[i].name)
+			}
+		}
+	}
+
 	if r.Port != 0 {
 		srcPort := detectListeningAppPorts(r.ProjectDir)
 		if len(srcPort) > 0 && !containsInt(srcPort, r.Port) {
@@ -523,7 +555,7 @@ func (r *Run) installProjectDeps(ctx context.Context, exe *remoteExec) {
 	if rep == nil || r.ProjectDir == "" {
 		return
 	}
-	cd := "cd " + singleQuoted(r.ProjectDir)
+	cd := "cd " + singleQuoted(r.DstProjectDir)
 	for _, lang := range rep.Languages {
 		switch {
 		case lang.Name == "python" && lang.Manager == "uv":
