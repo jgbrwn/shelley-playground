@@ -304,6 +304,13 @@ watch(
     } catch {
       /* settings endpoint failure shouldn't block the modal */
     }
+    // On reopen, reconnect to the SSE stream. The server replays all
+    // events from the start, so clear the console to avoid duplicates.
+    // If no deploy is running, the server sends "idle" immediately.
+    events.value = [];
+    finished.value = "";
+    running.value = false;
+    listen();
   },
 );
 
@@ -387,6 +394,9 @@ function listen() {
         scrollConsole();
         return;
       }
+      // A regular event means a deploy is running (covers reopen case
+      // where running was reset to false).
+      running.value = true;
       events.value.push(data as DeployEvent);
       scrollConsole();
     } catch {
@@ -481,6 +491,9 @@ function shortTime(t: string) {
 }
 
 function onClose() {
+  // Keep the deploy running server-side; just close the SSE listener to
+  // avoid orphaned connections. On reopen, watch(isOpen) reconnects.
+  es?.close();
   emit("close");
 }
 </script>
