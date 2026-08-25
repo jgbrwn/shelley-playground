@@ -107,7 +107,7 @@ func (r *Run) pipeline(c *execClient) {
 	}
 	r.emit("info", "ssh-key", "Registering Shelley deploy SSH key with exe.dev…")
 	if err := c.RegisterSSHKeyForTag(ctx, pubKey); err != nil {
-		errMsg = fmt.Sprintf("%v. The API key must permit ssh-key add. Create one with --cmds=whoami,ls,new,ssh-key\\ add,share\\ port,share\\ set-public,rm", err)
+		errMsg = fmt.Sprintf("%v. The API key must permit ssh-key add. Create one with --cmds=whoami,ls,new,ssh,ssh-key\\ add,share\\ port,share\\ set-public,rm", err)
 		r.emit("error", "ssh-key", errMsg)
 		return
 	}
