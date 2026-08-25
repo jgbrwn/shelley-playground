@@ -35,15 +35,21 @@ func (r *Run) reconcileState(ctx context.Context, client *ssh.Client, target *ss
 		r.reconcileNpmGlobals(ctx, exe)
 	} else {
 		r.emit("info", "state", "Minimal (project-scoped) mode: installing only what the project needs.")
-		r.reconcileFromReport(ctx, exe)
+		if err := r.reconcileFromReport(ctx, exe); err != nil {
+			return err
+		}
 	}
 	if !r.SkipSystemd {
-		r.reconcileSystemdUnits(ctx, exe)
+		if err := r.reconcileSystemdUnits(ctx, exe); err != nil {
+			return err
+		}
 	} else {
 		r.emit("info", "systemd", "Skipping systemd unit reconciliation (declined by user).")
 	}
-	r.reconcileUsersAndGroups(ctx, exe)
-	r.reconcileCrontabs(ctx, exe)
+	if r.FullClone {
+		r.reconcileUsersAndGroups(ctx, exe)
+		r.reconcileCrontabs(ctx, exe)
+	}
 	r.checkExecutables(ctx, exe)
 
 	return nil
@@ -56,15 +62,12 @@ type remoteExec struct {
 }
 
 func (e *remoteExec) run(ctx context.Context, cmd string) (string, error) {
-	t := &sshTarget{host: "", user: e.user, signer: nil}
-	_ = t
 	sess, err := e.client.NewSession()
 	if err != nil {
 		return "", err
 	}
 	defer sess.Close()
-	out, err := sess.CombinedOutput(cmd)
-	return string(out), err
+	return combinedOutputContext(ctx, sess, cmd)
 }
 
 // sudo wraps a command if the session user isn't root.
@@ -97,8 +100,30 @@ func (e *remoteExec) runStdin(ctx context.Context, cmd, stdin string) (string, e
 	}
 	defer sess.Close()
 	sess.Stdin = strings.NewReader(stdin)
-	out, err := sess.CombinedOutput(cmd)
-	return string(out), err
+	return combinedOutputContext(ctx, sess, cmd)
+}
+
+func combinedOutputContext(ctx context.Context, session *ssh.Session, cmd string) (string, error) {
+	type result struct {
+		out []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := session.CombinedOutput(cmd)
+		done <- result{out: out, err: err}
+	}()
+	select {
+	case result := <-done:
+		return string(result.out), result.err
+	case <-ctx.Done():
+		_ = session.Close()
+		result := <-done
+		if len(result.out) > 0 {
+			return string(result.out), ctx.Err()
+		}
+		return "", ctx.Err()
+	}
 }
 
 func sortedKeys(m map[string]bool) []string {
@@ -192,7 +217,7 @@ func (r *Run) reconcilePythonGlobals(ctx context.Context, exe *remoteExec) {
 		return
 	}
 	r.emitf("info", "pip", "Installing %d global python package(s)…", len(missing))
-	out, pipInstallErr := exe.trySudo(ctx, fmt.Sprintf("pip3 install --disable-pip-version-check -q %s", singleQuoted(strings.Join(missing, " "))))
+	out, pipInstallErr := exe.trySudo(ctx, "pip3 install --disable-pip-version-check -q "+quoteShellArgs(missing))
 	if pipInstallErr != nil {
 		r.emitf("warn", "pip", "Some global pip installs failed: %v\n%s", pipInstallErr, indentBlock(tail(out)))
 	} else {
@@ -221,7 +246,7 @@ func (r *Run) reconcileNpmGlobals(ctx context.Context, exe *remoteExec) {
 		return
 	}
 	r.emitf("info", "npm", "Installing %d global npm package(s)…", len(missing))
-	npmOut, npmInstallErr := exe.trySudo(ctx, fmt.Sprintf("npm install -g %s", singleQuoted(strings.Join(missing, " "))))
+	npmOut, npmInstallErr := exe.trySudo(ctx, "npm install -g "+quoteShellArgs(missing))
 	if npmInstallErr != nil {
 		r.emitf("warn", "npm", "Some npm installs failed: %v\n%s", npmInstallErr, indentBlock(tail(npmOut)))
 	} else {
@@ -231,63 +256,64 @@ func (r *Run) reconcileNpmGlobals(ctx context.Context, exe *remoteExec) {
 
 // --- systemd units ---
 
-func (r *Run) reconcileSystemdUnits(ctx context.Context, exe *remoteExec) {
-	units := localCustomUnits()
+type systemdPlan struct {
+	units     []localUnit
+	generated bool
+	start     appStart
+}
+
+func (r *Run) planSystemdUnits() (systemdPlan, error) {
+	units, err := localProjectUnits(r.ProjectDir)
+	if err != nil {
+		return systemdPlan{}, fmt.Errorf("discovering project systemd units: %w", err)
+	}
 	if len(units) == 0 {
-		r.emit("info", "systemd", "No custom systemd units on this VM to copy.")
-		return
+		start, err := detectAppStart(r.ProjectDir, r.Report, r.Port)
+		if err != nil {
+			return systemdPlan{}, err
+		}
+		unit := generatedSystemdUnit(filepath.Base(r.DstProjectDir), r.DstProjectDir, start)
+		return systemdPlan{units: []localUnit{unit}, generated: true, start: start}, nil
 	}
 
-	// Check if any unit references the project directory; if so, prefer only
-	// those project-related units. Otherwise copy all custom units (the
-	// original behavior — useful when units aren't project-specific).
-	var selected []localUnit
-	for _, u := range units {
-		if strings.Contains(u.content, r.ProjectDir) {
-			selected = append(selected, u)
+	for i := range units {
+		units[i].content = strings.ReplaceAll(units[i].content, r.ProjectDir, r.DstProjectDir)
+		if r.Port != 0 {
+			for _, sourcePort := range detectListeningAppPorts(r.ProjectDir) {
+				units[i].content, _ = replacePortInUnit(units[i].content, sourcePort, r.Port)
+			}
 		}
 	}
-	if len(selected) > 0 {
-		r.emitf("info", "systemd", "Found %d systemd unit(s) related to %s on source: %s",
-				len(selected), r.ProjectDir, strings.Join(unitNames(selected), ", "))
-		units = selected
+	return systemdPlan{units: units}, nil
+}
+
+func (r *Run) reconcileSystemdUnits(ctx context.Context, exe *remoteExec) error {
+	plan, err := r.planSystemdUnits()
+	if err != nil {
+		return fmt.Errorf("planning systemd service: %w", err)
+	}
+	if plan.generated {
+		r.emitf("info", "systemd", "No project systemd unit found; generating %s from %s: %s",
+			plan.units[0].name, plan.start.source, plan.start.command)
 	} else {
-		r.emitf("info", "systemd", "No project-specific systemd units found on source; copying all %d custom unit(s).", len(units))
+		r.emitf("info", "systemd", "Found %d project-related unit(s) on source: %s",
+			len(plan.units), strings.Join(unitNames(plan.units), ", "))
 	}
 
-	// Rewrite source project path → dst project path in unit files.
-	if r.DstProjectDir != "" && r.DstProjectDir != r.ProjectDir {
-		for i := range units {
-			if strings.Contains(units[i].content, r.ProjectDir) {
-				units[i].content = strings.ReplaceAll(units[i].content, r.ProjectDir, r.DstProjectDir)
-				r.emitf("info", "path", "Rewrote %s → %s in %s", r.ProjectDir, r.DstProjectDir, units[i].name)
-			}
+	for _, unit := range plan.units {
+		if err := writeSystemdUnit(ctx, exe, unit); err != nil {
+			return err
 		}
-	}
-
-	if r.Port != 0 {
-		srcPort := detectListeningAppPorts(r.ProjectDir)
-		if len(srcPort) > 0 && !containsInt(srcPort, r.Port) {
-			r.emitf("info", "port", "Rewriting unit files from source port(s) %s to deployment port %d.",
-				intJoin(srcPort, ", "), r.Port)
-			for i := range units {
-				for _, sp := range srcPort {
-					newContent, n := replacePortInUnit(units[i].content, sp, r.Port)
-					if n > 0 {
-						units[i].content = newContent
-						r.emitf("info", "port", "Rewrote %d port reference(s) in %s (%d → %d)", n, units[i].name, sp, r.Port)
-					}
-				}
-			}
-		}
-	}
-	r.emitf("info", "systemd", "Copying %d custom systemd unit(s): %s", len(units), strings.Join(unitNames(units), ", "))
-	for _, u := range units {
-		r.installUnit(ctx, exe, u)
 	}
 	if out, err := exe.trySudo(ctx, "systemctl daemon-reload"); err != nil {
-		r.emitf("warn", "systemd", "daemon-reload failed: %v\n%s", err, indentBlock(tail(out)))
+		return fmt.Errorf("systemctl daemon-reload: %w\n%s", err, indentBlock(tail(out)))
 	}
+	for _, unit := range plan.units {
+		if err := r.applySystemdUnitState(ctx, exe, unit); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func unitNames(units []localUnit) []string {
@@ -298,34 +324,44 @@ func unitNames(units []localUnit) []string {
 	return names
 }
 
-func (r *Run) installUnit(ctx context.Context, exe *remoteExec, u localUnit) {
-	// Copy the unit file.
-	mkdir := "mkdir -p /etc/systemd/system"
-	writeCmd := mkdir + " && tee /etc/systemd/system/" + u.name + " > /dev/null <<'UNIT_EOF'\n" + u.content + "\nUNIT_EOF"
-	if _, err := exe.trySudo(ctx, writeCmd); err != nil {
-		r.emitf("error", "systemd", "Failed to write unit %s: %v", u.name, err)
-		return
+var safeUnitNameRE = regexp.MustCompile(`^[A-Za-z0-9_.@-]+\.(service|timer|socket|path)$`)
+
+func writeSystemdUnit(ctx context.Context, exe *remoteExec, unit localUnit) error {
+	if !safeUnitNameRE.MatchString(unit.name) {
+		return fmt.Errorf("unsafe systemd unit name %q", unit.name)
 	}
-	if !u.enabled {
-		r.emitf("info", "systemd", "Installed %s (not enabled at boot, matching source).", u.name)
-		return
+	cmd := "umask 022; tmp=$(mktemp /etc/systemd/system/.shelley-deploy.XXXXXX); cat > \"$tmp\"; chmod 0644 \"$tmp\"; mv \"$tmp\" /etc/systemd/system/" + unit.name
+	out, err := exe.trySudoStdin(ctx, cmd, unit.content)
+	if err != nil {
+		return fmt.Errorf("writing systemd unit %s: %w\n%s", unit.name, err, indentBlock(tail(out)))
 	}
-	enableOut, enableErr := exe.trySudo(ctx, "systemctl enable "+u.name+" 2>&1")
-	if enableErr != nil {
-		r.emitf("warn", "systemd", "enable %s failed: %v\n%s", u.name, enableErr, indentBlock(tail(enableOut)))
-		return
-	}
-	// Start it only if it was active on src.
-	if u.active {
-		startOut, startErr := exe.trySudo(ctx, "systemctl start "+u.name+" 2>&1")
-		if startErr != nil {
-			r.emitf("error", "systemd", "start %s failed: %v\n%s", u.name, startErr, indentBlock(tail(startOut)))
-			return
+	return nil
+}
+
+func (r *Run) applySystemdUnitState(ctx context.Context, exe *remoteExec, unit localUnit) error {
+	if unit.enabled {
+		out, err := exe.trySudo(ctx, "systemctl enable "+unit.name+" 2>&1")
+		if err != nil {
+			return fmt.Errorf("enabling systemd unit %s: %w\n%s", unit.name, err, indentBlock(tail(out)))
 		}
-		r.emitf("success", "systemd", "%s enabled and started.", u.name)
-	} else {
-		r.emitf("success", "systemd", "%s enabled (was inactive on source; not started).", u.name)
 	}
+	if unit.active {
+		out, err := exe.trySudo(ctx, "systemctl start "+unit.name+" 2>&1")
+		if err != nil {
+			return fmt.Errorf("starting systemd unit %s: %w\n%s", unit.name, err, indentBlock(tail(out)))
+		}
+	}
+	switch {
+	case unit.enabled && unit.active:
+		r.emitf("success", "systemd", "%s enabled and started.", unit.name)
+	case unit.enabled:
+		r.emitf("success", "systemd", "%s enabled (inactive on source; not started).", unit.name)
+	case unit.active:
+		r.emitf("success", "systemd", "%s started (disabled on source; not enabled).", unit.name)
+	default:
+		r.emitf("info", "systemd", "Installed %s (disabled and inactive, matching source).", unit.name)
+	}
+	return nil
 }
 
 // --- users/groups/crontabs ---
@@ -409,17 +445,15 @@ func intJoin(list []int, sep string) string {
 	return strings.Join(parts, sep)
 }
 
-// replacePortInUnit rewrites occurrences of :port (in URLs, -addr flags,
-// --port flags, etc.) inside a unit file and returns the new content plus the
-// number of replacements.
+// replacePortInUnit rewrites standalone numeric port references while
+// preserving surrounding punctuation/whitespace.
 func replacePortInUnit(content string, from, to int) (string, int) {
-	n := 0
-	re := regexp.MustCompile(":" + fmt.Sprint(from) + "([^0-9]|$)")
-	out := re.ReplaceAllStringFunc(content, func(m string) string {
-		n++
-		return ":" + fmt.Sprint(to) + m[len(m)-1:]
-	})
-	return out, n
+	re := regexp.MustCompile(`(^|[^0-9])` + regexp.QuoteMeta(fmt.Sprint(from)) + `([^0-9]|$)`)
+	count := len(re.FindAllStringIndex(content, -1))
+	if count == 0 {
+		return content, 0
+	}
+	return re.ReplaceAllString(content, "${1}"+fmt.Sprint(to)+"${2}"), count
 }
 
 // detectListeningAppPorts finds TCP ports of processes whose cwd is inside
@@ -481,22 +515,20 @@ func atoiSafe(s string) int {
 // reconcileFromReport installs only the system packages the analyzed project
 // needs — not the whole source VM's package list. Also handles language-level
 // deps that need a live destination (uv install path, go/cargo builds).
-func (r *Run) reconcileFromReport(ctx context.Context, exe *remoteExec) {
+func (r *Run) reconcileFromReport(ctx context.Context, exe *remoteExec) error {
 	rep := r.Report
 	if rep == nil {
-		return
+		return nil
 	}
 	var missing []string
 	for _, pkg := range rep.SystemPackages {
+		// uv is not consistently packaged by Ubuntu/Debian. Provision it as
+		// the deploy user below so its binary lands in that user's PATH.
+		if pkg == "uv" {
+			continue
+		}
 		out, err := exe.trySudo(ctx, "dpkg-query -W -f='${Status}' "+pkg+" 2>/dev/null")
 		installed := err == nil && strings.Contains(out, "install ok installed")
-		// Special case: uv isn't in older Ubuntu repos; check PATH instead.
-		if pkg == "uv" && !installed {
-			out2, err2 := exe.trySudo(ctx, "command -v uv")
-			if err2 == nil && strings.TrimSpace(out2) != "" {
-				installed = true
-			}
-		}
 		if !installed {
 			missing = append(missing, pkg)
 		}
@@ -510,32 +542,36 @@ func (r *Run) reconcileFromReport(ctx context.Context, exe *remoteExec) {
 		cmd := fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq %s", strings.Join(missing, " "))
 		out, err := exe.trySudo(ctx, cmd)
 		if err != nil {
-			r.emitf("warn", "apt", "Some installs failed: %v\n%s", err, indentBlock(tail(out)))
-			// Retry one-by-one so one bad name doesn't sink the batch.
+			r.emitf("warn", "apt", "Batch install failed; retrying packages individually: %v\n%s", err, indentBlock(tail(out)))
+			var failed []string
 			for _, p := range missing {
 				if out, err := exe.trySudo(ctx, "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "+p); err != nil {
-					r.emitf("warn", "apt", "%s: %v (%s)", p, err, firstLineStr(tail(out)))
+					r.emitf("error", "apt", "%s: %v (%s)", p, err, firstLineStr(tail(out)))
+					failed = append(failed, p)
 				}
 			}
-		} else {
-			r.emitf("success", "apt", "Installed %d package(s).", len(missing))
+			if len(failed) > 0 {
+				return fmt.Errorf("installing required system packages failed: %s", strings.Join(failed, ", "))
+			}
 		}
+		r.emitf("success", "apt", "Installed %d package(s).", len(missing))
 	}
 
-	// uv needs the standalone installer when apt can't provide it.
+	// uv needs the standalone installer when the distro doesn't package it.
+	// Run it as the deploy user, not through sudo/root.
 	if langNeeds(rep, "python", "uv") {
-		out, err := exe.trySudo(ctx, "command -v uv || curl -LsSf https://astral.sh/uv/install.sh | sh")
+		out, err := exe.run(ctx, "command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh")
 		if err != nil {
-			r.emitf("warn", "uv", "Could not ensure uv on destination: %v\n%s", err, indentBlock(tail(out)))
-		} else if strings.Contains(out, "astral") || !strings.Contains(out, "/usr") {
-			r.emit("info", "uv", "Installed uv via astral.sh installer (~/.local/bin/uv).")
+			return fmt.Errorf("installing uv for deploy user: %w\n%s", err, indentBlock(tail(out)))
+		} else {
+			r.emit("success", "uv", "uv is available for the deploy user.")
 		}
 	}
 
 	// Install the project's own language-level dependencies on the
 	// destination. rsync excluded node_modules and venvs, so the dst has
 	// the source code but none of the installed deps. Rebuild them here.
-	r.installProjectDeps(ctx, exe)
+	return r.installProjectDeps(ctx, exe)
 }
 
 func firstLineStr(s string) string {
@@ -550,10 +586,10 @@ func firstLineStr(s string) string {
 // source code but no installed deps. This rebuilds them in-place.
 //
 // All commands run as the deploy user (not sudo) in the project directory.
-func (r *Run) installProjectDeps(ctx context.Context, exe *remoteExec) {
+func (r *Run) installProjectDeps(ctx context.Context, exe *remoteExec) error {
 	rep := r.Report
 	if rep == nil || r.ProjectDir == "" {
-		return
+		return nil
 	}
 	cd := "cd " + singleQuoted(r.DstProjectDir)
 	for _, lang := range rep.Languages {
@@ -562,108 +598,141 @@ func (r *Run) installProjectDeps(ctx context.Context, exe *remoteExec) {
 			r.emit("info", "deps", "Installing python dependencies (uv sync)…")
 			out, err := exe.run(ctx, cd+" && uv sync --quiet 2>&1")
 			if err != nil {
-				r.emitf("warn", "deps", "uv sync failed: %v\n%s", err, indentBlock(tail(out)))
-			} else {
-				r.emit("success", "deps", "Python dependencies installed (uv sync).")
+				return fmt.Errorf("uv sync: %w\n%s", err, indentBlock(tail(out)))
 			}
+			r.emit("success", "deps", "Python dependencies installed (uv sync).")
 		case lang.Name == "python":
-			// pip: reuse an existing venv if present (idempotent); create one
-			// only if none exists. python -m venv on an existing venv can
-			// corrupt it by overwriting the interpreter symlinks without
-			// clearing stale site-packages.
 			r.emit("info", "deps", "Installing python dependencies (pip)…")
-			reqFile := "requirements.txt"
-			if _, err := os.Stat(filepath.Join(r.ProjectDir, reqFile)); err != nil {
-				reqFile = "." // install from pyproject.toml
+			createVenv := "if [ ! -d .venv ]; then python3 -m venv .venv; fi"
+			var install string
+			switch {
+			case fileExists(filepath.Join(r.ProjectDir, "requirements.txt")):
+				install = ".venv/bin/pip install --quiet -r requirements.txt"
+			case fileExists(filepath.Join(r.ProjectDir, "pyproject.toml")), fileExists(filepath.Join(r.ProjectDir, "setup.py")):
+				install = ".venv/bin/pip install --quiet ."
+			case fileExists(filepath.Join(r.ProjectDir, "Pipfile")):
+				install = ".venv/bin/pip install --quiet pipenv && PIPENV_VENV_IN_PROJECT=1 .venv/bin/pipenv sync"
+			default:
+				return fmt.Errorf("python was detected but no supported dependency manifest was found")
 			}
-			cmd := cd + " && [ -d .venv ] || python3 -m venv .venv && .venv/bin/pip install --quiet -r " + reqFile + " 2>&1"
-			out, err := exe.run(ctx, cmd)
+			out, err := exe.run(ctx, cd+" && "+createVenv+" && "+install+" 2>&1")
 			if err != nil {
-				r.emitf("warn", "deps", "pip install failed: %v\n%s", err, indentBlock(tail(out)))
-			} else {
-				r.emit("success", "deps", "Python dependencies installed (pip).")
+				return fmt.Errorf("pip install: %w\n%s", err, indentBlock(tail(out)))
 			}
+			r.emit("success", "deps", "Python dependencies installed (pip).")
 		case lang.Name == "node" && lang.Manager == "pnpm":
 			r.emit("info", "deps", "Installing node dependencies (pnpm install)…")
+			if out, err := exe.trySudo(ctx, "command -v pnpm >/dev/null 2>&1 || npm install -g pnpm"); err != nil {
+				return fmt.Errorf("installing pnpm: %w\n%s", err, indentBlock(tail(out)))
+			}
 			out, err := exe.run(ctx, cd+" && pnpm install --frozen-lockfile 2>&1")
 			if err != nil {
-				r.emitf("warn", "deps", "pnpm install failed: %v\n%s", err, indentBlock(tail(out)))
-			} else {
-				r.emit("success", "deps", "Node dependencies installed (pnpm).")
+				return fmt.Errorf("pnpm install: %w\n%s", err, indentBlock(tail(out)))
+			}
+			r.emit("success", "deps", "Node dependencies installed (pnpm).")
+			if err := r.buildNodeProject(ctx, exe, "pnpm"); err != nil {
+				return err
 			}
 		case lang.Name == "node" && lang.Manager == "yarn":
 			r.emit("info", "deps", "Installing node dependencies (yarn install)…")
+			if out, err := exe.trySudo(ctx, "command -v yarn >/dev/null 2>&1 || npm install -g yarn"); err != nil {
+				return fmt.Errorf("installing yarn: %w\n%s", err, indentBlock(tail(out)))
+			}
 			out, err := exe.run(ctx, cd+" && yarn install --frozen-lockfile 2>&1")
 			if err != nil {
-				r.emitf("warn", "deps", "yarn install failed: %v\n%s", err, indentBlock(tail(out)))
-			} else {
-				r.emit("success", "deps", "Node dependencies installed (yarn).")
+				return fmt.Errorf("yarn install: %w\n%s", err, indentBlock(tail(out)))
+			}
+			r.emit("success", "deps", "Node dependencies installed (yarn).")
+			if err := r.buildNodeProject(ctx, exe, "yarn"); err != nil {
+				return err
+			}
+		case lang.Name == "node" && lang.Manager == "bun":
+			r.emit("info", "deps", "Installing node dependencies (bun install)…")
+			if out, err := exe.run(ctx, "command -v bun >/dev/null 2>&1 || curl -fsSL https://bun.sh/install | bash"); err != nil {
+				return fmt.Errorf("installing bun: %w\n%s", err, indentBlock(tail(out)))
+			}
+			out, err := exe.run(ctx, cd+" && ~/.bun/bin/bun install --frozen-lockfile 2>&1")
+			if err != nil {
+				return fmt.Errorf("bun install: %w\n%s", err, indentBlock(tail(out)))
+			}
+			r.emit("success", "deps", "Node dependencies installed (bun).")
+			if err := r.buildNodeProject(ctx, exe, "~/.bun/bin/bun"); err != nil {
+				return err
 			}
 		case lang.Name == "node":
-			r.emit("info", "deps", "Installing node dependencies (npm ci)…")
-			out, err := exe.run(ctx, cd+" && npm ci 2>&1")
+			installCommand := "npm install"
+			installLabel := "npm"
+			if fileExists(filepath.Join(r.ProjectDir, "package-lock.json")) {
+				installCommand = "npm ci"
+				installLabel = "npm ci"
+			}
+			r.emitf("info", "deps", "Installing node dependencies (%s)…", installCommand)
+			out, err := exe.run(ctx, cd+" && "+installCommand+" 2>&1")
 			if err != nil {
-				// npm ci requires a lockfile; fall back to npm install.
-				r.emitf("info", "deps", "npm ci failed (no lockfile?), trying npm install…")
-				out, err = exe.run(ctx, cd+" && npm install 2>&1")
-				if err != nil {
-					r.emitf("warn", "deps", "npm install failed: %v\n%s", err, indentBlock(tail(out)))
-				} else {
-					r.emit("success", "deps", "Node dependencies installed (npm).")
-				}
-			} else {
-				r.emit("success", "deps", "Node dependencies installed (npm ci).")
+				return fmt.Errorf("%s: %w\n%s", installCommand, err, indentBlock(tail(out)))
+			}
+			r.emitf("success", "deps", "Node dependencies installed (%s).", installLabel)
+			if err := r.buildNodeProject(ctx, exe, "npm"); err != nil {
+				return err
 			}
 		case lang.Name == "go":
 			r.emit("info", "deps", "Building go project…")
 			out, err := exe.run(ctx, cd+" && go build ./... 2>&1")
 			if err != nil {
-				r.emitf("warn", "deps", "go build failed: %v\n%s", err, indentBlock(tail(out)))
-			} else {
-				r.emit("success", "deps", "Go project built.")
+				return fmt.Errorf("go build: %w\n%s", err, indentBlock(tail(out)))
 			}
+			r.emit("success", "deps", "Go project built.")
 		case lang.Name == "rust":
 			r.emit("info", "deps", "Building rust project…")
 			out, err := exe.run(ctx, cd+" && cargo build --release 2>&1")
 			if err != nil {
-				r.emitf("warn", "deps", "cargo build failed: %v\n%s", err, indentBlock(tail(out)))
-			} else {
-				r.emit("success", "deps", "Rust project built.")
+				return fmt.Errorf("cargo build: %w\n%s", err, indentBlock(tail(out)))
 			}
+			r.emit("success", "deps", "Rust project built.")
 		case lang.Name == "ruby":
 			r.emit("info", "deps", "Installing ruby dependencies (bundle install)…")
 			out, err := exe.run(ctx, cd+" && bundle install 2>&1")
 			if err != nil {
-				r.emitf("warn", "deps", "bundle install failed: %v\n%s", err, indentBlock(tail(out)))
-			} else {
-				r.emit("success", "deps", "Ruby dependencies installed.")
+				return fmt.Errorf("bundle install: %w\n%s", err, indentBlock(tail(out)))
 			}
+			r.emit("success", "deps", "Ruby dependencies installed.")
 		case lang.Name == "php":
 			r.emit("info", "deps", "Installing php dependencies (composer install)…")
 			out, err := exe.run(ctx, cd+" && composer install --no-interaction 2>&1")
 			if err != nil {
-				r.emitf("warn", "deps", "composer install failed: %v\n%s", err, indentBlock(tail(out)))
-			} else {
-				r.emit("success", "deps", "PHP dependencies installed.")
+				return fmt.Errorf("composer install: %w\n%s", err, indentBlock(tail(out)))
 			}
+			r.emit("success", "deps", "PHP dependencies installed.")
 		case lang.Name == "java" && lang.Manager == "maven":
 			r.emit("info", "deps", "Building java project (mvn install)…")
 			out, err := exe.run(ctx, cd+" && mvn -q install 2>&1")
 			if err != nil {
-				r.emitf("warn", "deps", "mvn install failed: %v\n%s", err, indentBlock(tail(out)))
-			} else {
-				r.emit("success", "deps", "Java project built (maven).")
+				return fmt.Errorf("maven build: %w\n%s", err, indentBlock(tail(out)))
 			}
+			r.emit("success", "deps", "Java project built (maven).")
 		case lang.Name == "java" && lang.Manager == "gradle":
 			r.emit("info", "deps", "Building java project (gradle build)…")
 			out, err := exe.run(ctx, cd+" && ./gradlew build 2>&1")
 			if err != nil {
-				r.emitf("warn", "deps", "gradle build failed: %v\n%s", err, indentBlock(tail(out)))
-			} else {
-				r.emit("success", "deps", "Java project built (gradle).")
+				return fmt.Errorf("gradle build: %w\n%s", err, indentBlock(tail(out)))
 			}
+			r.emit("success", "deps", "Java project built (gradle).")
 		}
 	}
+	return nil
+}
+
+func (r *Run) buildNodeProject(ctx context.Context, exe *remoteExec, manager string) error {
+	if !packageHasScript(filepath.Join(r.ProjectDir, "package.json"), "build") {
+		return nil
+	}
+	r.emitf("info", "deps", "Running node build script (%s run build)…", manager)
+	out, err := exe.run(ctx, "cd "+singleQuoted(r.DstProjectDir)+" && "+manager+" run build 2>&1")
+	if err != nil {
+		return fmt.Errorf("node build: %w\n%s", err, indentBlock(tail(out)))
+	}
+	r.emit("success", "deps", "Node build completed.")
+	return nil
 }
 
 func langNeeds(rep *ProjectReport, lang, mgr string) bool {
@@ -682,7 +751,8 @@ func (r *Run) checkExecutables(ctx context.Context, exe *remoteExec) {
 		return
 	}
 	for _, e := range r.Report.Executables {
-		out, err := exe.trySudo(ctx, "ldd "+singleQuoted(e)+" 2>&1 | grep 'not found' || true")
+		remotePath := r.DstProjectDir + "/" + strings.TrimPrefix(filepath.ToSlash(e), "/")
+		out, err := exe.run(ctx, "ldd "+singleQuoted(remotePath)+" 2>&1 | grep 'not found' || true")
 		if err != nil {
 			continue
 		}
