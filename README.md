@@ -36,15 +36,15 @@ The modal collects:
 
 | Field | What it does |
 |---|---|
-| **New VM name** | Lowercase letters/digits/hyphens; becomes `https://<name>.exe.xyz` |
-| **Image** | Blank = default `exeuntu`; or prefilled `ghcr.io/ryanlewis/exeslim:latest`. **Must be Ubuntu/Debian-based** — the deployer uses apt, dpkg, and systemd to reconcile packages and services on the destination. |
-| **Project directory** | Suggested from the current conversation's cwd; rsync'd to `/home/exedev/<project-name>` on the new VM (not the full source path) |
-| **App port** | Auto-detected from processes running inside the project dir; drives `share port` + systemd `:PORT` rewriting |
+| **New VM name** *(required)* | Lowercase letters/digits with single internal hyphens; becomes `https://<name>.exe.xyz` |
+| **Image** *(optional)* | Blank resolves to standard `exeuntu`; otherwise the prefilled `ghcr.io/ryanlewis/exeslim:latest` or another Ubuntu/Debian-based image can be used. |
+| **Project directory** *(required)* | Suggested from the current conversation's cwd; canonicalized and rsync'd to `/home/exedev/<project-name>` on the new VM. A non-empty or symlinked destination is refused rather than overwritten. |
+| **App port** *(optional)* | Auto-detected from processes running inside the project dir; drives `share port`, service port rewriting, and post-start loopback verification |
 | **Make Public** | Runs `share set-public` at the end; new VMs are private by default |
-| **exe.dev API key** | Stored in the Shelley settings table (`deploy_api_key`), returned to the UI only masked; validated live via `POST https://exe.dev/exec` (`whoami`). Create with `ssh exe.dev ssh-key generate-api-key --cmds=whoami,ls,new,share\ port,share\ set-public,rm --exp=90d` — the `share port` and `share set-public` permissions are needed for proxy routing, `rm` for VM cleanup. The SSH key is installed via `--setup-script` on first boot (no `ssh-key` API permission needed). |
+| **exe.dev API key** *(required, saved or entered)* | Stored in the Shelley settings table (`deploy_api_key`), returned to the UI only masked; validated live via `POST https://exe.dev/exec` (`whoami`). Create with `ssh exe.dev ssh-key generate-api-key --cmds=whoami,ls,new,share\ port,share\ set-public,rm --exp=90d` — the `share port` and `share set-public` permissions are needed for proxy routing, `rm` for VM cleanup. The SSH key is installed idempotently via `--setup-script` on first boot (no `ssh-key` API permission needed). |
 | **Dry run** | Validates the key and prints the plan without creating anything |
 | **Full state clone** | Opt-in; when on, diffs **all** apt/pip/npm packages plus users and the user crontab src→dst. Off by default (= minimal/project-scoped mode, see below) |
-| **Skip systemd** | Opt-in; when checked, the deployer performs no systemd discovery or actions. Otherwise it copies only regular source units that directly reference the project (plus their companion timers/sockets/paths), rewriting source path/port references. If none exists, it generates one app service from a detected Procfile, start script, package `start` script, or supported web entry point. It never copies unrelated source units. |
+| **Skip systemd** | Opt-in; when checked, the deployer performs no systemd discovery, installation, startup, or bind-address enforcement. Otherwise it copies only regular source units that directly reference the project (plus companion timers/sockets/paths), rewrites paths/ports/wildcard binds, and restarts active services. If none exists, it generates one loopback-bound app service from a detected Procfile, start script, package `start` script, or supported web entry point. It never copies unrelated source units. |
 
 A live **SSE console** streams progress inside the modal. The run's events are also persisted to `deploy_runs` so the **Current run** can be reopened after a reload.
 
@@ -64,6 +64,9 @@ GET /api/deploy/analyze?dir=/home/exedev/playground/my-cool-app
 
 #### Lifecycle
 
+- The deployer creates a **new VM only** and refuses an existing VM name. It does not silently adopt or mutate an earlier deployment.
+- Before rsync, a non-empty or symlinked destination project path is refused. This prevents custom-image contents or partially owned application state from being clobbered.
+- Generated and copied active services are restarted after `daemon-reload`. When an app port is supplied, deployment fails unless that port comes up on `127.0.0.1`/`::1`; wildcard listeners are rejected.
 - Failed runs that actually created the VM offer **Delete VM `<name>`** (`POST /api/deploy/delete-vm` → `rm <vm>` with the saved API key). No delete button appears if the VM was never created.
 - `POST /api/deploy/cancel` cancels an in-flight deploy; `GET /api/deploy/current` resumes the console.
 
