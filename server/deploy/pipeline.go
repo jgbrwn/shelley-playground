@@ -36,10 +36,25 @@ func (r *Run) pipeline(c *execClient) {
 		r.emitf("info", "plan", "Would create VM %q (image: %s)", r.VMName, imageLabel(r.Image))
 		r.emitf("info", "plan", "Would rsync %s → %s on the new VM", r.ProjectDir, r.DstProjectDir)
 		r.emitf("info", "plan", "Would install project dependencies on destination (%s)", depInstallPlan(r.Report))
+		var unitPlan *systemdPlan
 		if r.SkipSystemd {
-			r.emit("info", "plan", "Would skip systemd unit reconciliation (declined).")
+			r.emit("info", "plan", "Would skip all systemd discovery, generation, installation, and startup (declined).")
 		} else {
-			r.emit("info", "plan", "Would copy/create systemd units on destination.")
+			plan, planErr := r.planSystemdUnits()
+			if planErr != nil {
+				errMsg = planErr.Error()
+				r.emit("error", "systemd", errMsg)
+				r.emitDependencyReport(nil)
+				return
+			}
+			unitPlan = &plan
+			if plan.generated {
+				r.emitf("info", "plan", "Would generate, enable, and start %s using %s: %s",
+					plan.units[0].name, plan.start.source, plan.start.command)
+			} else {
+				r.emitf("info", "plan", "Would copy only %d project-related systemd unit(s): %s",
+					len(plan.units), strings.Join(unitNames(plan.units), ", "))
+			}
 		}
 		if r.Port != 0 {
 			r.emitf("info", "plan", "Would route the VM's proxy to app port %d and configure services for it", r.Port)
@@ -48,7 +63,7 @@ func (r *Run) pipeline(c *execClient) {
 			r.emit("info", "plan", "Would share the VM publicly (share set-public)")
 		}
 		if r.FullClone && FullCloneSupported() {
-			r.emit("info", "plan", "Would run FULL state clone (all apt/pip/npm packages diffed src→dst).")
+			r.emit("info", "plan", "Would run FULL state clone (all apt/pip/npm packages, users, and user crontab diffed src→dst).")
 		} else {
 			mode := "MINIMAL (project-scoped)"
 			if r.FullClone {
@@ -57,7 +72,7 @@ func (r *Run) pipeline(c *execClient) {
 			r.emitf("info", "plan", "State reconciliation would be %s.", mode)
 		}
 		// Dependency report — always generated.
-		r.emitDependencyReport()
+		r.emitDependencyReport(unitPlan)
 		status = "success"
 		return
 	}
@@ -121,6 +136,25 @@ func (r *Run) pipeline(c *execClient) {
 		r.emit("error", "ssh", errMsg)
 		return
 	}
+	if target.user == rootUser {
+		r.emit("info", "ssh", "Connected as root; provisioning the exedev deploy user before file transfer…")
+		exe := &remoteExec{client: client, user: rootUser}
+		if out, provisionErr := exe.runStdin(ctx, "sh -s", setupScript(pubKey)); provisionErr != nil {
+			client.Close()
+			errMsg = fmt.Sprintf("provisioning exedev user: %v\n%s", provisionErr, indentBlock(tail(out)))
+			r.emit("error", "ssh", errMsg)
+			return
+		}
+		client.Close()
+		target = &sshTarget{host: host, user: exedevUser, signer: target.signer}
+		client, err = target.dial()
+		if err != nil {
+			errMsg = fmt.Sprintf("SSH as exedev after provisioning: %v", err)
+			r.emit("error", "ssh", errMsg)
+			return
+		}
+		r.emitf("success", "ssh", "Connected as %s@%s", exedevUser, host)
+	}
 	defer client.Close()
 
 	// Step 6: rsync project.
@@ -159,7 +193,7 @@ func (r *Run) pipeline(c *execClient) {
 }
 
 // emitDependencyReport prints what AnalyzeProject found for the project.
-func (r *Run) emitDependencyReport() {
+func (r *Run) emitDependencyReport(unitPlan *systemdPlan) {
 	rep := r.Report
 	if rep == nil {
 		return
@@ -183,29 +217,15 @@ func (r *Run) emitDependencyReport() {
 		r.emitf("info", "report", "Note: %s", n)
 	}
 
-	// Systemd units: show what the deployer found on source.
+	// Systemd plan: list only project units, or the generated app service.
 	if r.SkipSystemd {
-		r.emit("info", "report", "Systemd: skipped (declined by user).")
-	} else {
-		units := localCustomUnits()
-		if len(units) == 0 {
-			r.emit("info", "report", "Systemd: no custom units found on source; none will be created on destination.")
-		} else {
-			var projectUnits, otherUnits []string
-			for _, u := range units {
-				if strings.Contains(u.content, r.ProjectDir) {
-					projectUnits = append(projectUnits, u.name)
-				} else {
-					otherUnits = append(otherUnits, u.name)
-				}
-			}
-			if len(projectUnits) > 0 {
-				r.emitf("info", "report", "Systemd: %d project-related unit(s) found on source: %s", len(projectUnits), strings.Join(projectUnits, ", "))
-			}
-			if len(otherUnits) > 0 {
-				r.emitf("info", "report", "Systemd: %d other custom unit(s) on source (will also be copied): %s", len(otherUnits), strings.Join(otherUnits, ", "))
-			}
-		}
+		r.emit("info", "report", "Systemd: skipped; no systemd actions will run.")
+	} else if unitPlan != nil && unitPlan.generated {
+		r.emitf("info", "report", "Systemd: will generate %s from %s (%s).",
+			unitPlan.units[0].name, unitPlan.start.source, unitPlan.start.command)
+	} else if unitPlan != nil {
+		r.emitf("info", "report", "Systemd: %d project-related unit(s) will be copied: %s",
+			len(unitPlan.units), strings.Join(unitNames(unitPlan.units), ", "))
 	}
 
 	r.MarkdownReport = BuildMarkdownReport(rep)
@@ -247,6 +267,8 @@ func depInstallPlan(rep *ProjectReport) string {
 			parts = append(parts, "pnpm install")
 		case lang.Name == "node" && lang.Manager == "yarn":
 			parts = append(parts, "yarn install")
+		case lang.Name == "node" && lang.Manager == "bun":
+			parts = append(parts, "bun install")
 		case lang.Name == "node":
 			parts = append(parts, "npm install")
 		case lang.Name == "go":
