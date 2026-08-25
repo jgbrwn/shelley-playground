@@ -45,7 +45,20 @@ func parseSigner(privPath string) (ssh.Signer, error) {
 }
 
 // connectAsExedev connects with the exe.dev SSH user documented for VMs.
+// It emits the failure detail (used outside the retry loop).
 func (r *Run) connectAsExedev(host, privPath string) (*sshTarget, error) {
+	t, err := r.connectAsExedevQuiet(host, privPath)
+	if err != nil {
+		r.emitf("info", "ssh", "SSH as %s failed: %v", exedevUser, err)
+		return nil, err
+	}
+	r.emitf("success", "ssh", "Connected as %s@%s", exedevUser, host)
+	return t, nil
+}
+
+// connectAsExedevQuiet attempts the connection without emitting anything.
+// Used by waitForSSH's retry loop to avoid console spam.
+func (r *Run) connectAsExedevQuiet(host, privPath string) (*sshTarget, error) {
 	signer, err := parseSigner(privPath)
 	if err != nil {
 		return nil, fmt.Errorf("parsing deploy key: %w", err)
@@ -53,10 +66,8 @@ func (r *Run) connectAsExedev(host, privPath string) (*sshTarget, error) {
 	t := &sshTarget{host: host, user: exedevUser, signer: signer}
 	client, err := t.dial()
 	if err != nil {
-		r.emitf("info", "ssh", "SSH as %s failed: %v", exedevUser, err)
 		return nil, fmt.Errorf("could not SSH to %s as %s: %w", host, exedevUser, err)
 	}
-	r.emitf("success", "ssh", "Connected as %s@%s", exedevUser, host)
 	client.Close()
 	return t, nil
 }
