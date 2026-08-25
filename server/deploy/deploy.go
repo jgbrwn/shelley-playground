@@ -109,10 +109,10 @@ func NewManager(persist func(*Run) error) *Manager { return &Manager{persist: pe
 func (m *Manager) Busy() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.current != nil
+	return m.current != nil && !m.current.IsDone()
 }
 
-// Current returns the active run, or nil.
+// Current returns the most recent run (may be finished), or nil.
 func (m *Manager) Current() *Run {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -124,9 +124,10 @@ func (m *Manager) Current() *Run {
 func (m *Manager) Start(apiKey, vmName, image, projectDir string, port int, makePublic, dryRun, fullClone, skipSystemd bool) (*Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.current != nil {
+	if m.current != nil && !m.current.IsDone() {
 		return nil, fmt.Errorf("another deploy is already running")
 	}
+	m.current = nil // clear any finished run before starting a new one
 	if apiKey == "" {
 		return nil, fmt.Errorf("exe.dev API key is required")
 	}
@@ -172,12 +173,11 @@ func (m *Manager) Start(apiKey, vmName, image, projectDir string, port int, make
 	m.current = run
 	go func() {
 		defer close(run.done)
-		defer func() {
-			m.mu.Lock()
-			m.current = nil
-			m.mu.Unlock()
-		}()
 		run.pipeline(newExecClient(apiKey))
+		// Don't clear m.current immediately: the SSE handler may not have
+		// connected yet. Keep the finished run so /api/deploy/current can
+		// replay its events. The run is cleared when the next deploy starts
+		// (Start checks m.current != nil and rejects).
 	}()
 	return run, nil
 }
@@ -194,6 +194,16 @@ func (r *Run) Wait(ctx context.Context) error {
 
 // Done returns a channel closed when the run finishes.
 func (r *Run) Done() <-chan struct{} { return r.done }
+
+// IsDone reports whether the pipeline has finished (success or failure).
+func (r *Run) IsDone() bool {
+	select {
+	case <-r.done:
+		return true
+	default:
+		return false
+	}
+}
 
 // SnapshotEvents returns a copy of all events so far.
 func (r *Run) SnapshotEvents() []Event { return r.snapshot() }
