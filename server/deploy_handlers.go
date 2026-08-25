@@ -95,8 +95,8 @@ func (s *Server) handleDeployPutSettings(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	req.APIKey = strings.TrimSpace(req.APIKey)
-	if req.APIKey == "" {
-		http.Error(w, "api_key is required", http.StatusBadRequest)
+	if err := deploy.ValidateAPIKey(req.APIKey); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err := s.db.SetSetting(r.Context(), deployAPIKeySetting, req.APIKey); err != nil {
