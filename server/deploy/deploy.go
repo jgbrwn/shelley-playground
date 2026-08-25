@@ -128,8 +128,9 @@ func (m *Manager) Start(apiKey, vmName, image, projectDir string, port int, make
 		return nil, fmt.Errorf("another deploy is already running")
 	}
 	m.current = nil // clear any finished run before starting a new one
-	if apiKey == "" {
-		return nil, fmt.Errorf("exe.dev API key is required")
+	apiKey = strings.TrimSpace(apiKey)
+	if err := ValidateAPIKey(apiKey); err != nil {
+		return nil, err
 	}
 	if err := ValidateVMName(vmName); err != nil {
 		return nil, err
@@ -237,12 +238,28 @@ func (r *Run) Cancel() bool {
 	return false
 }
 
+func ValidateAPIKey(key string) error {
+	if key == "" {
+		return fmt.Errorf("exe.dev API key is required")
+	}
+	if len(key) > 4096 || strings.ContainsAny(key, " \t\r\n\x00") {
+		return fmt.Errorf("exe.dev API key has an invalid format")
+	}
+	if !strings.HasPrefix(key, "exe") || !strings.Contains(key, ".") {
+		return fmt.Errorf("exe.dev API key must use the exe API token format")
+	}
+	return nil
+}
+
 func ValidateVMName(name string) error {
 	if name == "" {
 		return fmt.Errorf("VM name is required")
 	}
 	if len(name) > 40 {
 		return fmt.Errorf("VM name too long (max 40 characters)")
+	}
+	if name[0] == '-' || name[len(name)-1] == '-' || strings.Contains(name, "--") {
+		return fmt.Errorf("VM name must start and end with a letter or digit and use single hyphens between parts")
 	}
 	for _, c := range name {
 		ok := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'
@@ -261,8 +278,17 @@ func validateProjectDir(dir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid project directory: %w", err)
 	}
+	abs, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolving project directory: %w", err)
+	}
+	abs = filepath.Clean(abs)
 	if abs == string(filepath.Separator) {
 		return "", fmt.Errorf("the filesystem root cannot be deployed as a project")
+	}
+	base := filepath.Base(abs)
+	if base == "." || base == ".." || strings.ContainsAny(base, "\r\n\x00") {
+		return "", fmt.Errorf("project directory has an unsafe basename")
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
