@@ -17,9 +17,19 @@ func TestValidateProjectDirRejectsFilesystemRoot(t *testing.T) {
 	}
 }
 
+func TestValidateProjectDirRejectsSymlinkToFilesystemRoot(t *testing.T) {
+	link := filepath.Join(t.TempDir(), "project")
+	if err := os.Symlink("/", link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateProjectDir(link); err == nil || !strings.Contains(err.Error(), "filesystem root") {
+		t.Fatalf("want symlink-to-root rejection, got %v", err)
+	}
+}
+
 func TestStartRejectsImageCommandInjection(t *testing.T) {
 	manager := NewManager(nil)
-	_, err := manager.Start("token", "safe-name", "ubuntu:24.04\nrm victim", "/does/not/matter", 0, false, true, false, true)
+	_, err := manager.Start("exe1.token", "safe-name", "ubuntu:24.04\nrm victim", "/does/not/matter", 0, false, true, false, true)
 	if err == nil || !strings.Contains(err.Error(), "image") {
 		t.Fatalf("want image validation error, got %v", err)
 	}
@@ -53,7 +63,7 @@ func TestDetectAppStartFastAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "uv run python -m uvicorn mediahub.app:app --host 0.0.0.0 --port 8123"
+	want := "uv run python -m uvicorn mediahub.app:app --host 127.0.0.1 --port 8123"
 	if start.command != want {
 		t.Fatalf("command = %q, want %q", start.command, want)
 	}
@@ -64,6 +74,7 @@ func TestDetectAppStartFastAPI(t *testing.T) {
 	for _, required := range []string{
 		"User=exedev",
 		"WorkingDirectory=/home/exedev/media-hub",
+		"Environment=HOST=127.0.0.1",
 		"ExecStart=/bin/sh -lc 'exec " + want + "'",
 		"Restart=on-failure",
 	} {
@@ -77,6 +88,30 @@ func TestDetectAppStartRefusesUnknownProject(t *testing.T) {
 	_, err := detectAppStart(t.TempDir(), &ProjectReport{}, 0)
 	if err == nil || !strings.Contains(err.Error(), "select Skip systemd") {
 		t.Fatalf("want actionable detection error, got %v", err)
+	}
+}
+
+func TestEnforceLoopbackUnit(t *testing.T) {
+	input := `[Unit]
+Description=app
+[Service]
+ExecStart=/app --host 0.0.0.0 --port 8000
+Environment=HOST=0.0.0.0
+[Socket]
+ListenStream=8000
+`
+	got := enforceLoopbackUnit(input)
+	for _, want := range []string{
+		"ExecStart=/app --host 127.0.0.1 --port 8000",
+		"Environment=HOST=127.0.0.1",
+		"ListenStream=127.0.0.1:8000",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("loopback unit missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "0.0.0.0") {
+		t.Fatalf("wildcard bind remained:\n%s", got)
 	}
 }
 
@@ -107,7 +142,7 @@ func TestDryRunGeneratesOnlyAppSystemdUnit(t *testing.T) {
 
 	withWhoamiEndpoint(t, func() {
 		manager := NewManager(nil)
-		run, err := manager.Start("token", "dry-run-systemd", "", dir, 8000, false, true, false, false)
+		run, err := manager.Start("exe1.token", "dry-run-systemd", "", dir, 8000, false, true, false, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -121,6 +156,9 @@ func TestDryRunGeneratesOnlyAppSystemdUnit(t *testing.T) {
 		if !strings.Contains(messages, "Would generate, enable, and start shelley-deploy-") {
 			t.Fatalf("dry-run did not describe generated app unit:\n%s", messages)
 		}
+		if !strings.Contains(messages, "127.0.0.1") {
+			t.Fatalf("generated app command is not loopback-bound:\n%s", messages)
+		}
 		if strings.Contains(messages, "other custom unit") || strings.Contains(messages, "copying all") {
 			t.Fatalf("dry-run contains unsafe broad systemd plan:\n%s", messages)
 		}
@@ -133,7 +171,7 @@ func TestDryRunSkipSystemdNeedsNoStartCommand(t *testing.T) {
 
 	withWhoamiEndpoint(t, func() {
 		manager := NewManager(nil)
-		run, err := manager.Start("token", "dry-run-skip", "", dir, 0, false, true, false, true)
+		run, err := manager.Start("exe1.token", "dry-run-skip", "", dir, 0, false, true, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}

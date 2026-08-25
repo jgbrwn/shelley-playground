@@ -21,6 +21,51 @@ var rsyncExcludes = []string{
 	".venv-backup",
 }
 
+func (r *Run) preflightDestination(ctx context.Context, exe *remoteExec) error {
+	osRelease, err := exe.run(ctx, "cat /etc/os-release 2>/dev/null")
+	if err != nil {
+		return fmt.Errorf("destination image has no readable /etc/os-release")
+	}
+	lower := strings.ToLower(osRelease)
+	if !strings.Contains(lower, "id=ubuntu") && !strings.Contains(lower, "id=debian") &&
+		!strings.Contains(lower, "id_like=ubuntu") && !strings.Contains(lower, "id_like=debian") {
+		return fmt.Errorf("destination image is not Ubuntu/Debian-based")
+	}
+	for _, command := range []string{"apt-get", "dpkg-query"} {
+		if _, err := exe.run(ctx, "command -v "+command+" >/dev/null 2>&1"); err != nil {
+			return fmt.Errorf("destination image is missing required command %s", command)
+		}
+	}
+	if !r.SkipSystemd {
+		if _, err := exe.run(ctx, "command -v systemctl >/dev/null 2>&1"); err != nil {
+			return fmt.Errorf("destination image is missing systemctl; select Skip systemd or use a systemd-based image")
+		}
+	}
+	if _, err := exe.run(ctx, "command -v rsync >/dev/null 2>&1"); err != nil {
+		out, installErr := exe.trySudo(ctx, "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync")
+		if installErr != nil {
+			return fmt.Errorf("installing destination rsync: %w\n%s", installErr, indentBlock(tail(out)))
+		}
+	}
+	return nil
+}
+
+// prepareDestination refuses to mutate a pre-populated application tree from
+// a custom image. The deployer currently creates new VMs rather than adopting
+// existing deployments, so a non-empty destination is ownership-ambiguous.
+func (r *Run) prepareDestination(ctx context.Context, exe *remoteExec) error {
+	dst := singleQuoted(r.DstProjectDir)
+	cmd := "if [ -L " + dst + " ]; then echo 'destination is a symlink'; exit 42; fi; " +
+		"if [ -e " + dst + " ] && [ -n \"$(find " + dst + " -mindepth 1 -maxdepth 1 -print -quit)\" ]; then " +
+		"echo 'destination already exists and is not empty'; exit 43; fi; " +
+		"mkdir -p " + dst + "; test -w " + dst
+	out, err := exe.run(ctx, cmd)
+	if err != nil {
+		return fmt.Errorf("destination preflight for %s failed: %w: %s", r.DstProjectDir, err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
 // rsyncProject copies the project dir to /home/exedev/<basename> on the dst
 // VM (not the full source path, which may be arbitrarily deep under
 // /home/exedev/playground/...). venvs inside the project are excluded here and
