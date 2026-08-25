@@ -59,16 +59,29 @@ func TestValidateVMName(t *testing.T) {
 			t.Errorf("%q: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "MyApp", "has space", "under_score", "-nope!"} {
+	for _, bad := range []string{"", "MyApp", "has space", "under_score", "-nope", "nope-", "two--hyphens"} {
 		if err := ValidateVMName(bad); err == nil {
 			t.Errorf("%q: expected error", bad)
 		}
 	}
 }
 
+func TestValidateAPIKey(t *testing.T) {
+	for _, valid := range []string{"exe0.abc123", "exe1.ABC_xyz-123"} {
+		if err := ValidateAPIKey(valid); err != nil {
+			t.Errorf("%q: %v", valid, err)
+		}
+	}
+	for _, invalid := range []string{"", "token", "exe1.bad token", "exe1.bad\nvalue"} {
+		if err := ValidateAPIKey(invalid); err == nil {
+			t.Errorf("%q: expected error", invalid)
+		}
+	}
+}
+
 func TestSetupScriptInstallsKey(t *testing.T) {
 	s := setupScript("ssh-ed25519 AAAA test")
-	for _, want := range []string{"/home/exedev", "/root", "authorized_keys", "useradd -m -s /bin/bash exedev"} {
+	for _, want := range []string{"/home/exedev", "root", "authorized_keys", "useradd -M", "id exedev"} {
 		if !contains(s, want) {
 			t.Errorf("setup script missing %q", want)
 		}
