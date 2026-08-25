@@ -298,8 +298,13 @@ func (s *Server) handleDeployDeleteVM(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if req.VMName == "" {
-		http.Error(w, "vm_name is required", http.StatusBadRequest)
+	if err := deploy.ValidateVMName(req.VMName); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	run := s.deployManager.Current()
+	if run == nil || run.Status() != "failed" || !run.VMCreated || run.VMName != req.VMName {
+		http.Error(w, "VM deletion is only allowed for the VM created by the current failed deploy", http.StatusConflict)
 		return
 	}
 	apiKey := strings.TrimSpace(req.APIKey)
