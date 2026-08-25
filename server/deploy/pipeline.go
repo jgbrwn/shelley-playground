@@ -310,18 +310,16 @@ func depInstallPlan(rep *ProjectReport) string {
 	return strings.Join(parts, ", ")
 }
 
-// createVM creates the VM and installs our SSH key via a follow-up API call.
+// createVM creates the VM and installs the deploy key through new's inline
+// setup-script argument. The HTTPS API has no stdin stream.
 // exe.dev's `new` may take longer than the /exec 30s limit; on timeout we poll.
 func (r *Run) createVM(ctx context.Context, c *execClient, pubKey string) error {
-	privPath, _, _ := ensureSSHKey() // already validated in pipeline
-
-	cmd := "new --name=" + r.VMName + " --no-email --json"
-	if r.Image != "" {
-		cmd += " --image=" + r.Image
+	cmd, err := newVMCommand(r.VMName, r.Image, pubKey)
+	if err != nil {
+		return err
 	}
-	cmd += " --setup-script=/dev/stdin"
 
-	_, apiErr := c.execWithBody(ctx, cmd, setupScript(pubKey))
+	_, apiErr := c.exec(ctx, cmd)
 	if apiErr == nil {
 		r.emit("success", "create", "VM created and first-boot setup script accepted.")
 	} else if isTimeoutErr(apiErr) {
@@ -329,8 +327,6 @@ func (r *Run) createVM(ctx context.Context, c *execClient, pubKey string) error 
 	} else {
 		return fmt.Errorf("creating VM: %w", apiErr)
 	}
-	_ = privPath
-
 	deadline := time.Now().Add(5 * time.Minute)
 	for time.Now().Before(deadline) {
 		vm, err := c.Find(ctx, r.VMName)
