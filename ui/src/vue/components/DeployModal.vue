@@ -97,7 +97,7 @@
         <small v-if="apiKeyError" class="deploy-field-error">{{ apiKeyError }}</small>
         <small v-else class="deploy-hint">
           Create one with
-          <code>ssh exe.dev ssh-key generate-api-key --cmds=whoami,ls,new,share\ port,share\ set-public,rm --exp=90d</code>.
+          <code>ssh exe.dev ssh-key generate-api-key --cmds=whoami,ls,new,ssh-key\ list,ssh-key\ add,share\ port,share\ set-public,rm --exp=90d</code>.
           {{ savedHint }}
         </small>
       </div>
