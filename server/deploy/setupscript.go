@@ -20,6 +20,10 @@ if ! id exedev >/dev/null 2>&1; then
     useradd -m -d /home/exedev -s /bin/bash exedev
   fi
 fi
+EXEDEV_SHELL=$(getent passwd exedev | cut -d: -f7)
+case "$EXEDEV_SHELL" in
+  */nologin|*/false|'') usermod -s /bin/bash exedev ;;
+esac
 
 for USER_NAME in exedev root; do
   ENTRY=$(getent passwd "$USER_NAME")
