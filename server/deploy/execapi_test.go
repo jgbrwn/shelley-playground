@@ -10,34 +10,24 @@ import (
 	"testing"
 )
 
-func TestNewVMCommandHasNoSetupScript(t *testing.T) {
+func TestNewVMCommandHasDeployTag(t *testing.T) {
 	cmd := newVMCommand("demo", "ubuntu:24.04")
-	if got, want := cmd, "new --name=demo --json --image=ubuntu:24.04"; got != want {
-		t.Fatalf("newVMCommand = %q, want %q", got, want)
+	want := "new --name=demo --json --tag=shelley-deploy --image=ubuntu:24.04"
+	if cmd != want {
+		t.Fatalf("newVMCommand = %q, want %q", cmd, want)
 	}
 	if strings.Contains(cmd, "setup-script") || strings.Contains(cmd, "no-email") {
 		t.Fatalf("unexpected create flags: %q", cmd)
 	}
 }
 
-func TestRegisterSSHKeyAddsOnlyWhenMissing(t *testing.T) {
+func TestRegisterSSHKeyForTag(t *testing.T) {
 	publicKey := "ssh-ed25519 AAAA deploy"
-	var commands []string
+	var command string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		command := string(body)
-		commands = append(commands, command)
-		switch command {
-		case "ssh-key list --json":
-			_, _ = w.Write([]byte(`{"ssh_keys":[]}`))
-		case "ssh-key add " + strconv.Quote(publicKey):
-			_, _ = w.Write([]byte(`{"status":"added"}`))
-		default:
-			t.Fatalf("unexpected command %q", command)
-		}
+		body, _ := io.ReadAll(r.Body)
+		command = string(body)
+		_, _ = w.Write([]byte(`{"status":"added"}`))
 	}))
 	defer srv.Close()
 
@@ -47,25 +37,19 @@ func TestRegisterSSHKeyAddsOnlyWhenMissing(t *testing.T) {
 	client := newExecClient("token")
 	client.hc = srv.Client()
 
-	added, err := client.RegisterSSHKey(context.Background(), publicKey)
-	if err != nil {
+	if err := client.RegisterSSHKeyForTag(context.Background(), publicKey); err != nil {
 		t.Fatal(err)
 	}
-	if !added {
-		t.Fatal("expected key to be added")
-	}
-	if got, want := strings.Join(commands, "\n"), "ssh-key list --json\nssh-key add "+strconv.Quote(publicKey); got != want {
-		t.Fatalf("commands = %q, want %q", got, want)
+	want := "ssh-key add --tag=shelley-deploy " + strconv.Quote(publicKey)
+	if command != want {
+		t.Fatalf("command = %q, want %q", command, want)
 	}
 }
 
-func TestRegisterSSHKeySkipsExistingKey(t *testing.T) {
+func TestRegisterSSHKeyForTagAlreadyExists(t *testing.T) {
 	publicKey := "ssh-ed25519 AAAA deploy"
-	var commands []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		commands = append(commands, string(body))
-		_, _ = w.Write([]byte(`{"ssh_keys":[{"public_key":"ssh-ed25519 AAAA deploy"}]}`))
+		http.Error(w, `this SSH key is already associated with your account`, http.StatusUnprocessableEntity)
 	}))
 	defer srv.Close()
 
@@ -75,12 +59,8 @@ func TestRegisterSSHKeySkipsExistingKey(t *testing.T) {
 	client := newExecClient("token")
 	client.hc = srv.Client()
 
-	added, err := client.RegisterSSHKey(context.Background(), publicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if added || len(commands) != 1 || commands[0] != "ssh-key list --json" {
-		t.Fatalf("existing key should not be added, commands = %v", commands)
+	if err := client.RegisterSSHKeyForTag(context.Background(), publicKey); err != nil {
+		t.Fatalf("already-associated should be treated as success, got %v", err)
 	}
 }
 

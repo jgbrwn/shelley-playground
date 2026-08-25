@@ -34,7 +34,7 @@ func (r *Run) pipeline(c *execClient) {
 	if r.DryRun {
 		r.emit("warn", "dry-run", "Dry run: stopping before VM creation.")
 		r.emitf("info", "plan", "Would create VM %q (image: %s)", r.VMName, imageLabel(r.Image))
-		r.emit("info", "plan", "Would ensure Shelley’s deploy public SSH key is registered with exe.dev (ssh-key list/add).")
+		r.emit("info", "plan", "Would ensure Shelley’s deploy public SSH key is registered with exe.dev (ssh-key add, scoped to deployer-created VMs via tag).")
 		r.emit("info", "plan", "Would verify the destination is Ubuntu/Debian-based and has required apt/systemd capabilities.")
 		r.emitf("info", "plan", "Would require %s on the new VM to be absent or empty (never overwrite a symlink/non-empty app tree)", r.DstProjectDir)
 		r.emitf("info", "plan", "Would rsync %s → %s on the new VM", r.ProjectDir, r.DstProjectDir)
@@ -97,27 +97,23 @@ func (r *Run) pipeline(c *execClient) {
 	}
 
 	// Step 3: ensure the local deploy key exists and its public half is
-	// registered with exe.dev's custom SSH service before creating a VM.
+	// registered with exe.dev, scoped to the deploy tag so exe.dev's custom
+	// sshd accepts it on deployer-created VMs.
 	privPath, pubKey, err := ensureSSHKey()
 	if err != nil {
 		errMsg = err.Error()
 		r.emit("error", "ssh-key", errMsg)
 		return
 	}
-	r.emit("info", "ssh-key", "Checking Shelley deploy SSH key registration with exe.dev…")
-	added, err := c.RegisterSSHKey(ctx, pubKey)
-	if err != nil {
-		errMsg = fmt.Sprintf("%v. The API key must permit ssh-key list and ssh-key add. Create one with --cmds=whoami,ls,new,ssh-key\\ list,ssh-key\\ add,share\\ port,share\\ set-public,rm", err)
+	r.emit("info", "ssh-key", "Registering Shelley deploy SSH key with exe.dev…")
+	if err := c.RegisterSSHKeyForTag(ctx, pubKey); err != nil {
+		errMsg = fmt.Sprintf("%v. The API key must permit ssh-key add. Create one with --cmds=whoami,ls,new,ssh-key\\ add,share\\ port,share\\ set-public,rm", err)
 		r.emit("error", "ssh-key", errMsg)
 		return
 	}
-	if added {
-		r.emit("success", "ssh-key", "Registered Shelley deploy public SSH key with exe.dev.")
-	} else {
-		r.emit("success", "ssh-key", "Shelley deploy public SSH key is already registered with exe.dev.")
-	}
+	r.emitf("success", "ssh-key", "Shelley deploy SSH key registered (scoped to tag: %s).", deployTag)
 
-	// Step 4: create the VM.
+	// Step 4: create the VM (tagged with deployTag for SSH key scoping).
 	r.emitf("info", "create", "Creating VM %q (image: %s)…", r.VMName, imageLabel(r.Image))
 	r.emit("info", "create", "This can take a minute or two.")
 	if err := r.createVM(ctx, c); err != nil {
@@ -338,18 +334,21 @@ func (r *Run) createVM(ctx context.Context, c *execClient) error {
 	return fmt.Errorf("VM %q did not appear within 5 minutes", r.VMName)
 }
 
-// waitForSSH retries until SSH answers as some user.
+// waitForSSH retries until SSH answers. It logs the first failure detail,
+// then emits a brief waiting message every ~30s to avoid console spam.
 func (r *Run) waitForSSH(ctx context.Context, host, privPath string) (*sshTarget, error) {
 	deadline := time.Now().Add(3 * time.Minute)
 	attempt := 0
 	for time.Now().Before(deadline) {
 		attempt++
-		t, err := r.connectAsExedev(host, privPath)
+		t, err := r.connectAsExedevQuiet(host, privPath)
 		if err == nil {
 			return t, nil
 		}
-		if attempt%6 == 1 { // ~every 30s
+		if attempt == 1 {
 			r.emitf("info", "ssh", "Waiting for SSH on %s…", host)
+		} else if attempt%6 == 0 { // ~every 30s
+			r.emitf("info", "ssh", "Still waiting for SSH on %s…", host)
 		}
 		select {
 		case <-ctx.Done():
@@ -357,7 +356,7 @@ func (r *Run) waitForSSH(ctx context.Context, host, privPath string) (*sshTarget
 		case <-time.After(5 * time.Second):
 		}
 	}
-	return nil, fmt.Errorf("SSH to %s never came up", host)
+	return nil, fmt.Errorf("SSH to %s never came up (timed out after 3 minutes)", host)
 }
 
 // finish marks the run complete.
