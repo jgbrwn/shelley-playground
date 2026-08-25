@@ -54,13 +54,18 @@ type remoteExec struct {
 	client *ssh.Client
 }
 
+// remotePath is prepended to every remote command so user-installed
+// tools (uv, cargo, etc.) are found in non-interactive SSH sessions
+// that don't source .bashrc.
+const pathPrefix = `export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"; `
+
 func (e *remoteExec) run(ctx context.Context, cmd string) (string, error) {
 	sess, err := e.client.NewSession()
 	if err != nil {
 		return "", err
 	}
 	defer sess.Close()
-	return combinedOutputContext(ctx, sess, cmd)
+	return combinedOutputContext(ctx, sess, pathPrefix+cmd)
 }
 
 // sudo wraps a command if the session user isn't root.
@@ -90,7 +95,7 @@ func (e *remoteExec) runStdin(ctx context.Context, cmd, stdin string) (string, e
 	}
 	defer sess.Close()
 	sess.Stdin = strings.NewReader(stdin)
-	return combinedOutputContext(ctx, sess, cmd)
+	return combinedOutputContext(ctx, sess, pathPrefix+cmd)
 }
 
 func combinedOutputContext(ctx context.Context, session *ssh.Session, cmd string) (string, error) {
