@@ -5,27 +5,31 @@ import (
 	"strings"
 )
 
-// setupScript returns the first-boot script that installs our deploy SSH key
-// for both plausible login users. Custom images may declare different
-// exe.dev/login-user values, so cover exedev and root; whichever the platform
-// uses, our key will be in its authorized_keys.
+// setupScript returns an idempotent first-boot script that ensures the exedev
+// account/home exist and installs the deploy key for exedev and root. Existing
+// accounts, homes, .ssh directories, and authorized_keys files are preserved.
 func setupScript(pubKey string) string {
 	return fmt.Sprintf(`#!/bin/sh
-set -e
+set -eu
 KEY=%q
-for HOME_DIR in /home/exedev /root; do
-  if [ "$HOME_DIR" = "/home/exedev" ] && ! id exedev >/dev/null 2>&1 && [ ! -d /home/exedev ]; then
-    # Image has no exedev user yet; create a matching one so paths align.
-    useradd -m -s /bin/bash exedev || true
+
+if ! id exedev >/dev/null 2>&1; then
+  if [ -d /home/exedev ]; then
+    useradd -M -d /home/exedev -s /bin/bash exedev
+  else
+    useradd -m -d /home/exedev -s /bin/bash exedev
   fi
-  if [ -d "$HOME_DIR/.ssh" ] || getent passwd "$HOME_DIR" >/dev/null 2>&1 || [ "$HOME_DIR" = "/root" ]; then
-    mkdir -p "$HOME_DIR/.ssh"
-    chmod 700 "$HOME_DIR/.ssh"
-    grep -qxF "$KEY" "$HOME_DIR/.ssh/authorized_keys" 2>/dev/null || echo "$KEY" >> "$HOME_DIR/.ssh/authorized_keys"
-    OWNER=$(stat -c '%%U' "$HOME_DIR")
-    chown -R "$OWNER" "$HOME_DIR/.ssh"
-    chmod 600 "$HOME_DIR/.ssh/authorized_keys"
-  fi
+fi
+
+for USER_NAME in exedev root; do
+  ENTRY=$(getent passwd "$USER_NAME")
+  HOME_DIR=$(printf '%%s' "$ENTRY" | cut -d: -f6)
+  GROUP_NAME=$(id -gn "$USER_NAME")
+  install -d -m 700 -o "$USER_NAME" -g "$GROUP_NAME" "$HOME_DIR/.ssh"
+  touch "$HOME_DIR/.ssh/authorized_keys"
+  grep -qxF "$KEY" "$HOME_DIR/.ssh/authorized_keys" || printf '%%s\n' "$KEY" >> "$HOME_DIR/.ssh/authorized_keys"
+  chown "$USER_NAME:$GROUP_NAME" "$HOME_DIR/.ssh/authorized_keys"
+  chmod 600 "$HOME_DIR/.ssh/authorized_keys"
 done
 `, pubKey)
 }
@@ -35,7 +39,7 @@ done
 // later steps can use one consistent account.
 func ensureExedevUser(uid, gid int, homeDir string) string {
 	if uid <= 0 {
-		return "useradd -m -s /bin/bash exedev"
+		return "id exedev >/dev/null 2>&1 || useradd -m -d /home/exedev -s /bin/bash exedev"
 	}
 	if homeDir == "" {
 		homeDir = "/home/exedev"
