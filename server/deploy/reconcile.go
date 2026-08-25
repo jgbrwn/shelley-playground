@@ -15,18 +15,10 @@ import (
 
 // reconcileState diffs system-level state between src (localhost) and dst and
 // replays the delta on dst: apt packages, pip/npm globals, systemd units,
-// users, groups, crontabs. Everything runs as target.user (exedev preferred;
-// sudo -n is used for privileged commands).
+// users, groups, crontabs. Commands run as exedev; privileged commands use
+// passwordless sudo provisioned by the destination image.
 func (r *Run) reconcileState(ctx context.Context, client *ssh.Client, target *sshTarget) error {
-	exe := &remoteExec{client: client, user: target.user}
-
-	// If we're root but exedev should exist, create it so paths align.
-	if target.user == rootUser {
-		r.emit("info", "state", "Connected as root; creating exedev user to align paths…")
-		if out, err := exe.run(ctx, ensureExedevUser(0, 0, "")); err != nil {
-			r.emitf("warn", "state", "Could not create exedev user: %v\n%s", err, indentBlock(out))
-		}
-	}
+	exe := &remoteExec{client: client}
 
 	if r.FullClone {
 		r.emit("info", "state", "Full state clone enabled: diffing all packages between source and destination…")
@@ -60,7 +52,6 @@ func (r *Run) reconcileState(ctx context.Context, client *ssh.Client, target *ss
 // remoteExec runs commands on dst, escalating with sudo -n where needed.
 type remoteExec struct {
 	client *ssh.Client
-	user   string
 }
 
 func (e *remoteExec) run(ctx context.Context, cmd string) (string, error) {
@@ -74,9 +65,6 @@ func (e *remoteExec) run(ctx context.Context, cmd string) (string, error) {
 
 // sudo wraps a command if the session user isn't root.
 func (e *remoteExec) sudo(cmd string) string {
-	if e.user == rootUser {
-		return cmd
-	}
 	return "sudo -n sh -c " + singleQuoted(cmd)
 }
 
