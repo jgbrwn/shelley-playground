@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -9,34 +10,80 @@ import (
 	"testing"
 )
 
-func TestNewVMCommandUsesInlineEscapedSetupScript(t *testing.T) {
-	pubKey := "ssh-ed25519 AAAA deploy"
-	cmd, err := newVMCommand("demo", "ubuntu:24.04", pubKey)
-	if err != nil {
-		t.Fatal(err)
+func TestNewVMCommandHasNoSetupScript(t *testing.T) {
+	cmd := newVMCommand("demo", "ubuntu:24.04")
+	if got, want := cmd, "new --name=demo --json --image=ubuntu:24.04"; got != want {
+		t.Fatalf("newVMCommand = %q, want %q", got, want)
 	}
-	if strings.Contains(cmd, "\n") || strings.Contains(cmd, "/dev/stdin") {
-		t.Fatalf("setup script must be inline for HTTPS API: %q", cmd)
-	}
-	prefix := "new --name=demo --json --image=ubuntu:24.04 --setup-script="
-	if !strings.HasPrefix(cmd, prefix) {
-		t.Fatalf("unexpected new command: %q", cmd)
-	}
-	decoded, err := strconv.Unquote(strings.TrimPrefix(cmd, prefix))
-	if err != nil {
-		t.Fatalf("setup-script is not a quoted argument: %v", err)
-	}
-	if decoded != setupScript(pubKey) {
-		t.Fatalf("decoded setup script differs:\nwant %q\n got %q", setupScript(pubKey), decoded)
+	if strings.Contains(cmd, "setup-script") || strings.Contains(cmd, "no-email") {
+		t.Fatalf("unexpected create flags: %q", cmd)
 	}
 }
 
-func TestInlineSetupScriptLimit(t *testing.T) {
-	_, err := inlineSetupScript(strings.Repeat("x", maxSetupScriptBytes+1))
-	if err == nil || !strings.Contains(err.Error(), "10 KiB") {
-		t.Fatalf("want size-limit error, got %v", err)
+func TestRegisterSSHKeyAddsOnlyWhenMissing(t *testing.T) {
+	publicKey := "ssh-ed25519 AAAA deploy"
+	var commands []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		command := string(body)
+		commands = append(commands, command)
+		switch command {
+		case "ssh-key list --json":
+			_, _ = w.Write([]byte(`{"ssh_keys":[]}`))
+		case "ssh-key add " + strconv.Quote(publicKey):
+			_, _ = w.Write([]byte(`{"status":"added"}`))
+		default:
+			t.Fatalf("unexpected command %q", command)
+		}
+	}))
+	defer srv.Close()
+
+	previous := endpoint
+	endpoint = srv.URL
+	defer func() { endpoint = previous }()
+	client := newExecClient("token")
+	client.hc = srv.Client()
+
+	added, err := client.RegisterSSHKey(context.Background(), publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !added {
+		t.Fatal("expected key to be added")
+	}
+	if got, want := strings.Join(commands, "\n"), "ssh-key list --json\nssh-key add "+strconv.Quote(publicKey); got != want {
+		t.Fatalf("commands = %q, want %q", got, want)
 	}
 }
+
+func TestRegisterSSHKeySkipsExistingKey(t *testing.T) {
+	publicKey := "ssh-ed25519 AAAA deploy"
+	var commands []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		commands = append(commands, string(body))
+		_, _ = w.Write([]byte(`{"ssh_keys":[{"public_key":"ssh-ed25519 AAAA deploy"}]}`))
+	}))
+	defer srv.Close()
+
+	previous := endpoint
+	endpoint = srv.URL
+	defer func() { endpoint = previous }()
+	client := newExecClient("token")
+	client.hc = srv.Client()
+
+	added, err := client.RegisterSSHKey(context.Background(), publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added || len(commands) != 1 || commands[0] != "ssh-key list --json" {
+		t.Fatalf("existing key should not be added, commands = %v", commands)
+	}
+}
+
 func TestExecClientWhoami(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok" {
