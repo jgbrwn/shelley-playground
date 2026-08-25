@@ -294,11 +294,24 @@ function listen() {
       if (data.type === "finished") {
         finished.value = data.status;
         if (data.markdown_report) markdownReport.value = data.markdown_report;
+        if (data.status === "failed" && data.error) {
+          const message = String(data.error);
+          const alreadyShown = events.value.some((event) => event.level === "error" && event.message === message);
+          if (!alreadyShown) {
+            events.value.push({
+              time: new Date().toISOString(),
+              level: "error",
+              step: "deploy",
+              message,
+            });
+          }
+        }
         if (data.status === "failed" && data.vm_created) {
           failedVMName.value = data.vm_name ?? "";
         }
         running.value = false;
         es?.close();
+        scrollConsole();
         return;
       }
       events.value.push(data as DeployEvent);
