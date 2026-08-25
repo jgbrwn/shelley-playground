@@ -3572,8 +3572,13 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	redactPrivateSettings(settings)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(settings)
+}
+
+func redactPrivateSettings(settings map[string]string) {
+	delete(settings, deployAPIKeySetting)
 }
 
 // handleSetSetting sets a single setting
