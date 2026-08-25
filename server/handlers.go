@@ -4055,7 +4055,12 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	redactPrivateSettings(settings)
 	writeJSON(w, http.StatusOK, settings)
+}
+
+func redactPrivateSettings(settings map[string]string) {
+	delete(settings, deployAPIKeySetting)
 }
 
 // handleSetSetting sets a single setting

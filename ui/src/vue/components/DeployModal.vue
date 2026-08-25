@@ -131,6 +131,14 @@
           text
           @click="cancel"
         />
+        <Button
+          v-if="dryRun && !running && events.length"
+          label="Copy dry run"
+          severity="secondary"
+          text
+          icon="pi pi-copy"
+          @click="copyDryRun"
+        />
         <Button v-if="!running && events.length" label="Clear console" severity="secondary" text @click="clearConsole" />
       </div>
     </div>
@@ -207,11 +215,12 @@ let es: EventSource | null = null;
 const savedHint = ref("");
 
 const portHint = computed(() => {
-  if (!port.value.trim()) {
+  const value = port.value.trim();
+  if (!value) {
     return "Leave blank to skip proxy routing and service reconfiguration.";
   }
-  const p = parseInt(port.value, 10);
-  if (isNaN(p) || p !== parseFloat(port.value)) return "";
+  if (!/^\d+$/.test(value)) return "Enter a whole-number port from 3000 to 9999.";
+  const p = Number(value);
   if (p === 8000) return "Port 8000 is the exe.dev default proxy target.";
   if (p >= 3000 && p <= 9999) return `The new VM's URL will be https://name.exe.xyz:${p}/`;
   return "Ports 3000–9999 are supported by the exe.dev proxy.";
@@ -259,15 +268,15 @@ async function start() {
       const s = await deployApi.getSettings();
       maskedKey.value = s.api_key_masked;
     }
-    const p = parseInt(port.value, 10);
+    const p = parseDeployPort(port.value);
     await deployApi.start({
       vm_name: vmName.value.trim(),
       image: image.value.trim(),
       project_dir: projectDir.value.trim(),
-      port: port.value.trim() && !isNaN(p) ? p : undefined,
+      port: p,
       make_public: makePublic.value,
       dry_run: dryRun.value,
-      full_clone: dryRun.value || fullCloneSupported.value ? fullClone.value : false,
+      full_clone: fullCloneSupported.value && fullClone.value,
       skip_systemd: skipSystemd.value,
       api_key: "", // already persisted above when replaced
     });
@@ -375,6 +384,26 @@ function scrollConsole() {
   });
 }
 
+function parseDeployPort(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error("App port must contain digits only.");
+  }
+  const parsed = Number(trimmed);
+  if (parsed < 3000 || parsed > 9999) {
+    throw new Error("App port must be between 3000 and 9999.");
+  }
+  return parsed;
+}
+
+async function copyDryRun() {
+  const lines = events.value.map((event) => `${shortTime(event.time)} [${event.step}] ${event.message}`);
+  if (finished.value === "success") lines.push("✅ Deploy finished");
+  if (finished.value === "failed") lines.push("❌ Deploy failed");
+  await navigator.clipboard.writeText(lines.join("\n"));
+}
+
 async function copyReport() {
   try {
     await navigator.clipboard.writeText(markdownReport.value);
@@ -446,6 +475,7 @@ function onClose() {
 }
 .deploy-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
 }
