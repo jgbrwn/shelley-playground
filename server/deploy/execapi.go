@@ -75,41 +75,34 @@ func firstWord(s string) string {
 	return s
 }
 
+// deployTag is the tag applied to every VM created by the deployer.
+// The Shelley deploy SSH key is scoped to this tag, so the same key
+// works for all deployer-created VMs without per-VM key management.
+const deployTag = "shelley-deploy"
+
 func newVMCommand(vmName, image string) string {
-	cmd := "new --name=" + vmName + " --json"
+	cmd := "new --name=" + vmName + " --json --tag=" + deployTag
 	if image != "" {
 		cmd += " --image=" + image
 	}
 	return cmd
 }
 
-// SSHKey describes an account SSH public key returned by ssh-key list.
-type SSHKey struct {
-	PublicKey string `json:"public_key"`
-}
-
-// RegisterSSHKey ensures publicKey is registered with exe.dev. The private
-// key never leaves this VM; exe.dev only receives its public counterpart.
-func (c *execClient) RegisterSSHKey(ctx context.Context, publicKey string) (bool, error) {
-	out, err := c.exec(ctx, "ssh-key list --json")
+// RegisterSSHKeyForTag adds publicKey to the exe.dev account scoped to
+// deployTag. If the key is already on the account (from a previous deploy)
+// exe.dev returns an "already associated" error which we treat as success.
+// The private key never leaves this VM.
+func (c *execClient) RegisterSSHKeyForTag(ctx context.Context, publicKey string) error {
+	cmd := "ssh-key add --tag=" + deployTag + " " + strconv.Quote(publicKey)
+	_, err := c.exec(ctx, cmd)
 	if err != nil {
-		return false, fmt.Errorf("listing registered SSH keys: %w", err)
-	}
-	var result struct {
-		Keys []SSHKey `json:"ssh_keys"`
-	}
-	if err := json.Unmarshal([]byte(out), &result); err != nil {
-		return false, fmt.Errorf("unexpected ssh-key list output: %w", err)
-	}
-	for _, key := range result.Keys {
-		if key.PublicKey == publicKey {
-			return false, nil
+		if strings.Contains(err.Error(), "already associated") ||
+			strings.Contains(err.Error(), "already") {
+			return nil
 		}
+		return fmt.Errorf("registering deploy SSH key: %w", err)
 	}
-	if _, err := c.exec(ctx, "ssh-key add "+strconv.Quote(publicKey)); err != nil {
-		return false, fmt.Errorf("registering deploy SSH key: %w", err)
-	}
-	return true, nil
+	return nil
 }
 
 // VM describes one VM from `ls --json`.
@@ -192,14 +185,10 @@ func (c *execClient) SetPublic(ctx context.Context, vm string, public bool) erro
 	return err
 }
 
-// NewVM creates a VM. image may be empty for the default image. The SSH
-// bootstrap (installing our deploy key) happens in a follow-up API call once
-// the VM exists — see sshkeys.go / pipeline.go.
+// NewVM creates a VM tagged with deployTag. image may be empty for the
+// default image. SSH authorization is handled by RegisterSSHKeyForTag.
 func (c *execClient) NewVM(ctx context.Context, name, image string) error {
-	cmd := "new --name=" + name + " --json"
-	if image != "" {
-		cmd += " --image=" + image
-	}
+	cmd := newVMCommand(name, image)
 	_, err := c.exec(ctx, cmd)
 	return err
 }
