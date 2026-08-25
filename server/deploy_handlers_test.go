@@ -6,6 +6,20 @@ import (
 	"shelley.exe.dev/server/deploy"
 )
 
+func TestRedactPrivateSettingsRemovesDeployAPIKey(t *testing.T) {
+	settings := map[string]string{
+		"theme":             "dark",
+		deployAPIKeySetting: "exe1.secret",
+	}
+	redactPrivateSettings(settings)
+	if settings["theme"] != "dark" {
+		t.Fatal("non-secret setting was removed")
+	}
+	if _, ok := settings[deployAPIKeySetting]; ok {
+		t.Fatal("deploy API key remained in public settings")
+	}
+}
+
 func TestWritePendingDeployEventsFlushesEventsAddedBeforeDone(t *testing.T) {
 	events := []deploy.Event{
 		{Level: "info", Step: "validate", Message: "Validating exe.dev API key…"},
