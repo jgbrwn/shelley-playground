@@ -16,6 +16,8 @@ var rsyncExcludes = []string{
 	"node_modules",
 	"__pycache__",
 	"*.pyc",
+	".venv",
+	"venv",
 	".venv-backup",
 }
 
@@ -64,7 +66,7 @@ func findVenvs(root string) []string {
 		name := filepath.Base(p)
 		if (name == "venv" || name == ".venv") && isVenv(p) {
 			out = append(out, p)
-			return filepath.SkipAll
+			return filepath.SkipDir
 		}
 		return nil
 	})
