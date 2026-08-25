@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // rsyncExcludes are never worth copying to a deployment VM.
@@ -22,15 +23,36 @@ var rsyncExcludes = []string{
 }
 
 func (r *Run) preflightDestination(ctx context.Context, exe *remoteExec) error {
-	osRelease, err := exe.run(ctx, "cat /etc/os-release 2>/dev/null")
-	if err != nil {
-		return fmt.Errorf("destination image has no readable /etc/os-release")
+	var lastErr error
+	var lastOutput string
+	for attempt := 1; attempt <= 10; attempt++ {
+		out, err := exe.run(ctx, "if [ -r /etc/os-release ]; then cat /etc/os-release; else echo '/etc/os-release is not readable' >&2; exit 1; fi")
+		if err == nil && strings.TrimSpace(out) != "" {
+			lower := strings.ToLower(out)
+			if !strings.Contains(lower, "id=ubuntu") && !strings.Contains(lower, "id=debian") &&
+				!strings.Contains(lower, "id_like=ubuntu") && !strings.Contains(lower, "id_like=debian") {
+				return fmt.Errorf("destination image is not Ubuntu/Debian-based:\n%s", strings.TrimSpace(out))
+			}
+			return r.preflightDestinationCommands(ctx, exe)
+		}
+		if err == nil {
+			lastErr = fmt.Errorf("remote command returned empty output")
+		} else {
+			lastErr = err
+		}
+		lastOutput = out
+		if attempt < 10 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
+			}
+		}
 	}
-	lower := strings.ToLower(osRelease)
-	if !strings.Contains(lower, "id=ubuntu") && !strings.Contains(lower, "id=debian") &&
-		!strings.Contains(lower, "id_like=ubuntu") && !strings.Contains(lower, "id_like=debian") {
-		return fmt.Errorf("destination image is not Ubuntu/Debian-based")
-	}
+	return fmt.Errorf("could not read destination /etc/os-release after SSH became available: %w\n%s", lastErr, strings.TrimSpace(lastOutput))
+}
+
+func (r *Run) preflightDestinationCommands(ctx context.Context, exe *remoteExec) error {
 	for _, command := range []string{"apt-get", "dpkg-query"} {
 		if _, err := exe.run(ctx, "command -v "+command+" >/dev/null 2>&1"); err != nil {
 			return fmt.Errorf("destination image is missing required command %s", command)
