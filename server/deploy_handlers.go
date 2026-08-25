@@ -193,8 +193,28 @@ func (s *Server) handleDeployCurrent(w http.ResponseWriter, r *http.Request) {
 
 	run := s.deployManager.Current()
 	if run == nil {
-		// No live run: send current status so the UI can settle.
+		// No run at all: send idle so the UI settles.
 		writeEvent(map[string]any{"type": "idle"})
+		return
+	}
+
+	// If the run already finished (race: pipeline ran fast, SSE connected
+	// late), replay all events + the finished event immediately.
+	if run.IsDone() {
+		for _, e := range run.SnapshotEvents() {
+			if !writeEvent(e) {
+				return
+			}
+		}
+		final := map[string]any{
+			"type":            "finished",
+			"status":          run.Status(),
+			"error":           run.ErrMsg(),
+			"vm_name":         run.VMName,
+			"vm_created":      run.VMCreated,
+			"markdown_report": run.MarkdownReport,
+		}
+		writeEvent(final)
 		return
 	}
 
