@@ -18,7 +18,7 @@ func TestNewVMCommandUsesInlineEscapedSetupScript(t *testing.T) {
 	if strings.Contains(cmd, "\n") || strings.Contains(cmd, "/dev/stdin") {
 		t.Fatalf("setup script must be inline for HTTPS API: %q", cmd)
 	}
-	prefix := "new --name=demo --no-email --json --image=ubuntu:24.04 --setup-script="
+	prefix := "new --name=demo --json --image=ubuntu:24.04 --setup-script="
 	if !strings.HasPrefix(cmd, prefix) {
 		t.Fatalf("unexpected new command: %q", cmd)
 	}
