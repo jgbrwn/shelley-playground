@@ -35,9 +35,11 @@ func (r *Run) reconcileState(ctx context.Context, client *ssh.Client, target *ss
 		r.reconcileNpmGlobals(ctx, exe)
 	} else {
 		r.emit("info", "state", "Minimal (project-scoped) mode: installing only what the project needs.")
-		if err := r.reconcileFromReport(ctx, exe); err != nil {
-			return err
-		}
+	}
+	// Project environments are always rebuilt because rsync deliberately
+	// excludes virtualenvs and node_modules, including in full-clone mode.
+	if err := r.reconcileFromReport(ctx, exe); err != nil {
+		return err
 	}
 	if !r.SkipSystemd {
 		if err := r.reconcileSystemdUnits(ctx, exe); err != nil {
@@ -278,6 +280,7 @@ func (r *Run) planSystemdUnits() (systemdPlan, error) {
 
 	for i := range units {
 		units[i].content = strings.ReplaceAll(units[i].content, r.ProjectDir, r.DstProjectDir)
+		units[i].content = enforceLoopbackUnit(units[i].content)
 		if r.Port != 0 {
 			for _, sourcePort := range detectListeningAppPorts(r.ProjectDir) {
 				units[i].content, _ = replacePortInUnit(units[i].content, sourcePort, r.Port)
@@ -308,8 +311,17 @@ func (r *Run) reconcileSystemdUnits(ctx context.Context, exe *remoteExec) error 
 	if out, err := exe.trySudo(ctx, "systemctl daemon-reload"); err != nil {
 		return fmt.Errorf("systemctl daemon-reload: %w\n%s", err, indentBlock(tail(out)))
 	}
+	verifyLoopback := false
 	for _, unit := range plan.units {
 		if err := r.applySystemdUnitState(ctx, exe, unit); err != nil {
+			return err
+		}
+		if unit.active && strings.HasSuffix(unit.name, ".service") {
+			verifyLoopback = true
+		}
+	}
+	if verifyLoopback && r.Port != 0 {
+		if err := r.verifyLoopbackListener(ctx, exe); err != nil {
 			return err
 		}
 	}
@@ -330,7 +342,12 @@ func writeSystemdUnit(ctx context.Context, exe *remoteExec, unit localUnit) erro
 	if !safeUnitNameRE.MatchString(unit.name) {
 		return fmt.Errorf("unsafe systemd unit name %q", unit.name)
 	}
-	cmd := "umask 022; tmp=$(mktemp /etc/systemd/system/.shelley-deploy.XXXXXX); cat > \"$tmp\"; chmod 0644 \"$tmp\"; mv \"$tmp\" /etc/systemd/system/" + unit.name
+	target := "/etc/systemd/system/" + unit.name
+	cmd := "umask 022; tmp=$(mktemp /etc/systemd/system/.shelley-deploy.XXXXXX); " +
+		"trap 'rm -f \"$tmp\"' EXIT; cat > \"$tmp\"; chmod 0644 \"$tmp\"; " +
+		"if [ -L " + target + " ]; then echo 'destination unit is a symlink'; exit 45; fi; " +
+		"if [ -e " + target + " ] && ! cmp -s \"$tmp\" " + target + "; then echo 'destination unit already exists with different content'; exit 46; fi; " +
+		"mv \"$tmp\" " + target + "; trap - EXIT"
 	out, err := exe.trySudoStdin(ctx, cmd, unit.content)
 	if err != nil {
 		return fmt.Errorf("writing systemd unit %s: %w\n%s", unit.name, err, indentBlock(tail(out)))
@@ -346,9 +363,9 @@ func (r *Run) applySystemdUnitState(ctx context.Context, exe *remoteExec, unit l
 		}
 	}
 	if unit.active {
-		out, err := exe.trySudo(ctx, "systemctl start "+unit.name+" 2>&1")
+		out, err := exe.trySudo(ctx, "systemctl restart "+unit.name+" 2>&1")
 		if err != nil {
-			return fmt.Errorf("starting systemd unit %s: %w\n%s", unit.name, err, indentBlock(tail(out)))
+			return fmt.Errorf("restarting systemd unit %s: %w\n%s", unit.name, err, indentBlock(tail(out)))
 		}
 	}
 	switch {
@@ -361,6 +378,30 @@ func (r *Run) applySystemdUnitState(ctx context.Context, exe *remoteExec, unit l
 	default:
 		r.emitf("info", "systemd", "Installed %s (disabled and inactive, matching source).", unit.name)
 	}
+	return nil
+}
+
+func (r *Run) verifyLoopbackListener(ctx context.Context, exe *remoteExec) error {
+	if _, err := exe.run(ctx, "command -v ss >/dev/null 2>&1"); err != nil {
+		out, installErr := exe.trySudo(ctx, "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2")
+		if installErr != nil {
+			return fmt.Errorf("installing iproute2 for listener verification: %w\n%s", installErr, indentBlock(tail(out)))
+		}
+	}
+	port := strconv.Itoa(r.Port)
+	command := "for i in $(seq 1 40); do addresses=$(ss -H -ltn 'sport = :" + port + "' | awk '{print $4}'); " +
+		"if [ -n \"$addresses\" ]; then printf '%s\\n' \"$addresses\"; exit 0; fi; sleep 0.25; done; exit 44"
+	out, err := exe.run(ctx, command)
+	if err != nil {
+		return fmt.Errorf("app did not begin listening on port %d after systemd startup", r.Port)
+	}
+	for _, address := range strings.Fields(out) {
+		if strings.HasPrefix(address, "127.0.0.1:") || strings.HasPrefix(address, "[::1]:") || strings.HasPrefix(address, "::1:") {
+			continue
+		}
+		return fmt.Errorf("app port %d is listening on non-loopback address %s; deployment requires 127.0.0.1", r.Port, address)
+	}
+	r.emitf("success", "port", "Verified app port %d is listening only on loopback.", r.Port)
 	return nil
 }
 
@@ -445,15 +486,61 @@ func intJoin(list []int, sep string) string {
 	return strings.Join(parts, sep)
 }
 
-// replacePortInUnit rewrites standalone numeric port references while
-// preserving surrounding punctuation/whitespace.
+// replacePortInUnit rewrites standalone port references only in directives
+// that can define an app listener. Other numbers in the unit are untouched.
 func replacePortInUnit(content string, from, to int) (string, int) {
+	lines := strings.Split(content, "\n")
+	count := 0
 	re := regexp.MustCompile(`(^|[^0-9])` + regexp.QuoteMeta(fmt.Sprint(from)) + `([^0-9]|$)`)
-	count := len(re.FindAllStringIndex(content, -1))
-	if count == 0 {
-		return content, 0
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "ExecStart=") &&
+			!strings.HasPrefix(trimmed, "Environment=") &&
+			!strings.HasPrefix(trimmed, "ListenStream=") {
+			continue
+		}
+		count += len(re.FindAllStringIndex(line, -1))
+		lines[i] = re.ReplaceAllString(line, "${1}"+fmt.Sprint(to)+"${2}")
 	}
-	return re.ReplaceAllString(content, "${1}"+fmt.Sprint(to)+"${2}"), count
+	return strings.Join(lines, "\n"), count
+}
+
+func enforceLoopbackUnit(content string) string {
+	lines := strings.Split(content, "\n")
+	hasService := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "[Service]" {
+			hasService = true
+		}
+		if strings.HasPrefix(trimmed, "ExecStart=") || strings.HasPrefix(trimmed, "Environment=") {
+			lines[i] = loopbackCommand(line)
+			continue
+		}
+		if strings.HasPrefix(trimmed, "ListenStream=") {
+			value := strings.TrimSpace(strings.TrimPrefix(trimmed, "ListenStream="))
+			switch {
+			case regexp.MustCompile(`^[0-9]+$`).MatchString(value):
+				lines[i] = strings.Replace(line, "ListenStream="+value, "ListenStream=127.0.0.1:"+value, 1)
+			default:
+				lines[i] = loopbackCommand(line)
+			}
+		}
+	}
+	if hasService {
+		for i, line := range lines {
+			if strings.TrimSpace(line) == "[Service]" {
+				environment := []string{
+					"Environment=HOST=127.0.0.1",
+					"Environment=FLASK_RUN_HOST=127.0.0.1",
+					"Environment=UVICORN_HOST=127.0.0.1",
+				}
+				lines = append(lines[:i+1], append(environment, lines[i+1:]...)...)
+				break
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // detectListeningAppPorts finds TCP ports of processes whose cwd is inside
