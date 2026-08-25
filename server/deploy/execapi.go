@@ -92,7 +92,7 @@ func newVMCommand(vmName, image, pubKey string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cmd := "new --name=" + vmName + " --no-email --json"
+	cmd := "new --name=" + vmName + " --json"
 	if image != "" {
 		cmd += " --image=" + image
 	}
@@ -183,7 +183,7 @@ func (c *execClient) SetPublic(ctx context.Context, vm string, public bool) erro
 // bootstrap (installing our deploy key) happens in a follow-up API call once
 // the VM exists — see sshkeys.go / pipeline.go.
 func (c *execClient) NewVM(ctx context.Context, name, image string) error {
-	cmd := "new --name=" + name + " --no-email --json"
+	cmd := "new --name=" + name + " --json"
 	if image != "" {
 		cmd += " --image=" + image
 	}
