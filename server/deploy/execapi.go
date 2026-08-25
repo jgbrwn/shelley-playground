@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -23,19 +24,11 @@ func newExecClient(token string) *execClient {
 
 var endpoint = "https://exe.dev/exec"
 
-// exec runs one CLI command via the API and returns stdout.
+// exec runs one CLI command via the HTTPS API and returns stdout. The API
+// accepts exactly one command line in the request body; unlike SSH, it has no
+// stdin stream.
 func (c *execClient) exec(ctx context.Context, command string) (string, error) {
-	return c.execWithBody(ctx, command, "")
-}
-
-// execWithBody runs a command with an optional extra POST body (used to feed
-// /dev/stdin for setup scripts).
-func (c *execClient) execWithBody(ctx context.Context, command, extraBody string) (string, error) {
-	full := strings.TrimSpace(command)
-	if extraBody != "" {
-		full += "\n" + extraBody
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(full))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(strings.TrimSpace(command)))
 	if err != nil {
 		return "", err
 	}
@@ -80,6 +73,30 @@ func firstWord(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+const maxSetupScriptBytes = 10 * 1024
+
+// inlineSetupScript returns a quoted --setup-script argument for the HTTPS
+// API. Unlike SSH, POST /exec has no stdin: the script must travel in the
+// command itself with newline escape sequences.
+func inlineSetupScript(script string) (string, error) {
+	if len(script) > maxSetupScriptBytes {
+		return "", fmt.Errorf("setup script exceeds exe.dev's 10 KiB limit")
+	}
+	return strconv.Quote(script), nil
+}
+
+func newVMCommand(vmName, image, pubKey string) (string, error) {
+	setupArg, err := inlineSetupScript(setupScript(pubKey))
+	if err != nil {
+		return "", err
+	}
+	cmd := "new --name=" + vmName + " --no-email --json"
+	if image != "" {
+		cmd += " --image=" + image
+	}
+	return cmd + " --setup-script=" + setupArg, nil
 }
 
 // VM describes one VM from `ls --json`.
