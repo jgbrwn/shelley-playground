@@ -31,7 +31,7 @@ type ProjectReport struct {
 // knownToolPackages maps commands an app may invoke to the apt package that
 // provides them on Ubuntu/Debian.
 var knownToolPackages = map[string]string{
-	"python3": "python3", "pip3": "python3-pip", "uv": "uv",
+	"python3": "python3", "pip3": "python3-pip", "uv": "",
 	"node": "nodejs", "npm": "npm",
 	"go":    "golang-go",
 	"cargo": "cargo", "rustc": "rustc",
@@ -130,7 +130,7 @@ func AnalyzeProject(dir string) (*ProjectReport, error) {
 		addPkg("python3-pip")
 		addPkg("python3-venv")
 		if uvLock {
-			addPkg("uv") // not in Ubuntu repos before 24.04; installer noted in report
+			rep.Notes = append(rep.Notes, "uv will be provisioned with its standalone installer when it is not already available on the destination.")
 		}
 	}
 
@@ -357,7 +357,7 @@ func BuildMarkdownReport(rep *ProjectReport) string {
 	}
 
 	if len(rep.Executables) > 0 {
-		b.WriteString("\n## Built executables\n\nShared-library requirements of these binaries will be checked (and installed via ldd diffing) on destination:\n\n")
+		b.WriteString("\n## Built executables\n\nShared-library requirements of these binaries will be checked and any missing libraries reported on destination:\n\n")
 		for _, e := range rep.Executables {
 			fmt.Fprintf(&b, "- `%s`\n", e)
 		}
