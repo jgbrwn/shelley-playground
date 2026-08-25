@@ -34,6 +34,7 @@ func (r *Run) pipeline(c *execClient) {
 	if r.DryRun {
 		r.emit("warn", "dry-run", "Dry run: stopping before VM creation.")
 		r.emitf("info", "plan", "Would create VM %q (image: %s)", r.VMName, imageLabel(r.Image))
+		r.emit("info", "plan", "Would ensure Shelley’s deploy public SSH key is registered with exe.dev (ssh-key list/add).")
 		r.emit("info", "plan", "Would verify the destination is Ubuntu/Debian-based and has required apt/systemd capabilities.")
 		r.emitf("info", "plan", "Would require %s on the new VM to be absent or empty (never overwrite a symlink/non-empty app tree)", r.DstProjectDir)
 		r.emitf("info", "plan", "Would rsync %s → %s on the new VM", r.ProjectDir, r.DstProjectDir)
@@ -95,18 +96,31 @@ func (r *Run) pipeline(c *execClient) {
 		return
 	}
 
-	// Step 3: ensure deploy SSH key exists.
+	// Step 3: ensure the local deploy key exists and its public half is
+	// registered with exe.dev's custom SSH service before creating a VM.
 	privPath, pubKey, err := ensureSSHKey()
 	if err != nil {
 		errMsg = err.Error()
 		r.emit("error", "ssh-key", errMsg)
 		return
 	}
+	r.emit("info", "ssh-key", "Checking Shelley deploy SSH key registration with exe.dev…")
+	added, err := c.RegisterSSHKey(ctx, pubKey)
+	if err != nil {
+		errMsg = fmt.Sprintf("%v. The API key must permit ssh-key list and ssh-key add. Create one with --cmds=whoami,ls,new,ssh-key\\ list,ssh-key\\ add,share\\ port,share\\ set-public,rm", err)
+		r.emit("error", "ssh-key", errMsg)
+		return
+	}
+	if added {
+		r.emit("success", "ssh-key", "Registered Shelley deploy public SSH key with exe.dev.")
+	} else {
+		r.emit("success", "ssh-key", "Shelley deploy public SSH key is already registered with exe.dev.")
+	}
 
 	// Step 4: create the VM.
 	r.emitf("info", "create", "Creating VM %q (image: %s)…", r.VMName, imageLabel(r.Image))
 	r.emit("info", "create", "This can take a minute or two.")
-	if err := r.createVM(ctx, c, pubKey); err != nil {
+	if err := r.createVM(ctx, c); err != nil {
 		errMsg = err.Error()
 		r.emit("error", "create", errMsg)
 		return
@@ -141,28 +155,9 @@ func (r *Run) pipeline(c *execClient) {
 		r.emit("error", "ssh", errMsg)
 		return
 	}
-	if target.user == rootUser {
-		r.emit("info", "ssh", "Connected as root; provisioning the exedev deploy user before file transfer…")
-		exe := &remoteExec{client: client, user: rootUser}
-		if out, provisionErr := exe.runStdin(ctx, "sh -s", setupScript(pubKey)); provisionErr != nil {
-			client.Close()
-			errMsg = fmt.Sprintf("provisioning exedev user: %v\n%s", provisionErr, indentBlock(tail(out)))
-			r.emit("error", "ssh", errMsg)
-			return
-		}
-		client.Close()
-		target = &sshTarget{host: host, user: exedevUser, signer: target.signer}
-		client, err = target.dial()
-		if err != nil {
-			errMsg = fmt.Sprintf("SSH as exedev after provisioning: %v", err)
-			r.emit("error", "ssh", errMsg)
-			return
-		}
-		r.emitf("success", "ssh", "Connected as %s@%s", exedevUser, host)
-	}
 	defer client.Close()
 
-	if err := r.preflightDestination(ctx, &remoteExec{client: client, user: target.user}); err != nil {
+	if err := r.preflightDestination(ctx, &remoteExec{client: client}); err != nil {
 		errMsg = err.Error()
 		r.emit("error", "preflight", errMsg)
 		return
@@ -170,7 +165,7 @@ func (r *Run) pipeline(c *execClient) {
 
 	// Refuse to clobber application state preloaded by a custom image. This
 	// deploy flow owns only a new or empty destination directory.
-	if err := r.prepareDestination(ctx, &remoteExec{client: client, user: target.user}); err != nil {
+	if err := r.prepareDestination(ctx, &remoteExec{client: client}); err != nil {
 		errMsg = err.Error()
 		r.emit("error", "rsync", errMsg)
 		return
@@ -310,18 +305,15 @@ func depInstallPlan(rep *ProjectReport) string {
 	return strings.Join(parts, ", ")
 }
 
-// createVM creates the VM and installs the deploy key through new's inline
-// setup-script argument. The HTTPS API has no stdin stream.
+// createVM creates a new VM. SSH authorization is handled separately through
+// exe.dev's ssh-key API before this command runs.
 // exe.dev's `new` may take longer than the /exec 30s limit; on timeout we poll.
-func (r *Run) createVM(ctx context.Context, c *execClient, pubKey string) error {
-	cmd, err := newVMCommand(r.VMName, r.Image, pubKey)
-	if err != nil {
-		return err
-	}
+func (r *Run) createVM(ctx context.Context, c *execClient) error {
+	cmd := newVMCommand(r.VMName, r.Image)
 
 	_, apiErr := c.exec(ctx, cmd)
 	if apiErr == nil {
-		r.emit("success", "create", "VM created and first-boot setup script accepted.")
+		r.emit("success", "create", "VM creation request accepted.")
 	} else if isTimeoutErr(apiErr) {
 		r.emit("warn", "create", "Creation request timed out at the API layer (normal); polling for the VM…")
 	} else {
@@ -352,7 +344,7 @@ func (r *Run) waitForSSH(ctx context.Context, host, privPath string) (*sshTarget
 	attempt := 0
 	for time.Now().Before(deadline) {
 		attempt++
-		t, err := r.connectWithUserLadder(host, privPath)
+		t, err := r.connectAsExedev(host, privPath)
 		if err == nil {
 			return t, nil
 		}
