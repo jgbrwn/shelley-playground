@@ -24,6 +24,12 @@ func (r *Run) reconcileState(ctx context.Context, client *ssh.Client, target *ss
 		r.emit("info", "state", "Full state clone enabled: diffing all packages between source and destination…")
 		r.reconcilePackages(ctx, exe)
 		r.reconcilePythonGlobals(ctx, exe)
+		// Node must be provisioned before npm globals so the version matches.
+		if r.needsNode() {
+			if err := r.provisionNode(ctx, exe); err != nil {
+				return err
+			}
+		}
 		r.reconcileNpmGlobals(ctx, exe)
 	} else {
 		r.emit("info", "state", "Minimal (project-scoped) mode: installing only what the project needs.")
@@ -648,6 +654,17 @@ func (r *Run) reconcileFromReport(ctx context.Context, exe *remoteExec) error {
 		}
 	}
 
+	// Node.js is provisioned via the official NodeSource installer, not apt.
+	// apt's nodejs package is often outdated (e.g. Node 18 on Ubuntu 24.04)
+	// while modern projects need Node 20+. We match the source VM's major
+	// version to avoid ESM/CJS incompatibilities.
+	// Skip if already provisioned (full-clone mode installs it earlier).
+	if !r.FullClone && r.needsNode() {
+		if err := r.provisionNode(ctx, exe); err != nil {
+			return err
+		}
+	}
+
 	// Install the project's own language-level dependencies on the
 	// destination. rsync excluded node_modules and venvs, so the dst has
 	// the source code but none of the installed deps. Rebuild them here.
@@ -659,6 +676,67 @@ func firstLineStr(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// sourceNodeMajor returns the major version of node on the source VM (e.g. "24"),
+// or "" if node is not installed.
+func sourceNodeMajor() string {
+	out, err := runLocal("node", "--version")
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(out)
+	if len(s) >= 2 && s[0] == 'v' {
+		return s[1:strings.IndexByte(s, '.')]
+	}
+	return ""
+}
+
+// provisionNode installs Node.js on the destination via the official
+// NodeSource installer. It matches the source VM's major version when
+// possible (to avoid ESM/CJS incompatibilities), or installs the latest
+// LTS if the source version can't be determined. apt's nodejs package
+// is removed first to prevent version conflicts.
+func (r *Run) provisionNode(ctx context.Context, exe *remoteExec) error {
+	srcMajor := sourceNodeMajor()
+	// Check if dst already has a compatible node.
+	out, _ := exe.run(ctx, "node --version 2>/dev/null")
+	dstVer := strings.TrimSpace(out)
+	if dstVer != "" && strings.HasPrefix(dstVer, "v") {
+		dstMajor := dstVer[1:strings.IndexByte(dstVer, '.')]
+		if srcMajor == "" || dstMajor == srcMajor {
+			r.emitf("success", "node", "Node.js %s already installed on destination.", dstVer)
+			return nil
+		}
+		r.emitf("info", "node", "Destination has Node %s but source has Node %s; upgrading…", dstMajor, srcMajor)
+	} else {
+		r.emit("info", "node", "Installing Node.js on destination…")
+	}
+
+	// Remove apt's nodejs/npm to avoid conflicts with the NodeSource version.
+	exe.trySudoIgnoreErr(ctx, "DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq nodejs npm 2>/dev/null; true")
+
+	// Install via NodeSource. Use the source major version if known,
+	// otherwise fall back to the latest LTS (currently 22.x).
+	nodeMajor := srcMajor
+	if nodeMajor == "" {
+		nodeMajor = "22"
+	}
+	script := fmt.Sprintf("curl -fsSL https://deb.nodesource.com/setup_%s.x | bash -", nodeMajor)
+	if out, err := exe.trySudo(ctx, script); err != nil {
+		return fmt.Errorf("NodeSource setup script failed: %w\n%s", err, indentBlock(tail(out)))
+	}
+	if out, err := exe.trySudo(ctx, "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs"); err != nil {
+		return fmt.Errorf("installing Node.js: %w\n%s", err, indentBlock(tail(out)))
+	}
+
+	// Verify the installation.
+	out, err := exe.run(ctx, "node --version")
+	if err != nil {
+		return fmt.Errorf("Node.js installed but 'node --version' failed: %w", err)
+	}
+	r.emitf("success", "node", "Node.js %s installed via NodeSource.", strings.TrimSpace(out))
+	return nil
 }
 
 // installProjectDeps runs the project's own dependency install/build command
@@ -818,6 +896,19 @@ func (r *Run) buildNodeProject(ctx context.Context, exe *remoteExec, manager str
 func langNeeds(rep *ProjectReport, lang, mgr string) bool {
 	for _, l := range rep.Languages {
 		if l.Name == lang && l.Manager == mgr {
+			return true
+		}
+	}
+	return false
+}
+
+// needsNode reports whether the project uses Node.js (any manager).
+func (r *Run) needsNode() bool {
+	if r.Report == nil {
+		return false
+	}
+	for _, l := range r.Report.Languages {
+		if l.Name == "node" {
 			return true
 		}
 	}
