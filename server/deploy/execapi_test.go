@@ -4,10 +4,39 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
 
+func TestNewVMCommandUsesInlineEscapedSetupScript(t *testing.T) {
+	pubKey := "ssh-ed25519 AAAA deploy"
+	cmd, err := newVMCommand("demo", "ubuntu:24.04", pubKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(cmd, "\n") || strings.Contains(cmd, "/dev/stdin") {
+		t.Fatalf("setup script must be inline for HTTPS API: %q", cmd)
+	}
+	prefix := "new --name=demo --no-email --json --image=ubuntu:24.04 --setup-script="
+	if !strings.HasPrefix(cmd, prefix) {
+		t.Fatalf("unexpected new command: %q", cmd)
+	}
+	decoded, err := strconv.Unquote(strings.TrimPrefix(cmd, prefix))
+	if err != nil {
+		t.Fatalf("setup-script is not a quoted argument: %v", err)
+	}
+	if decoded != setupScript(pubKey) {
+		t.Fatalf("decoded setup script differs:\nwant %q\n got %q", setupScript(pubKey), decoded)
+	}
+}
+
+func TestInlineSetupScriptLimit(t *testing.T) {
+	_, err := inlineSetupScript(strings.Repeat("x", maxSetupScriptBytes+1))
+	if err == nil || !strings.Contains(err.Error(), "10 KiB") {
+		t.Fatalf("want size-limit error, got %v", err)
+	}
+}
 func TestExecClientWhoami(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok" {
