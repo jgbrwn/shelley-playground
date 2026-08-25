@@ -115,11 +115,11 @@ func (s *Server) handleDeployStart(w http.ResponseWriter, r *http.Request) {
 		Image       string `json:"image"`
 		ProjectDir  string `json:"project_dir"`
 		Port        int    `json:"port"` // 0 = no specific port handling
-		MakePublic bool   `json:"make_public"`
-		DryRun     bool   `json:"dry_run"`
-		FullClone  bool   `json:"full_clone"`
-		SkipSystemd bool  `json:"skip_systemd"`
-		APIKey     string `json:"api_key"` // optional; falls back to saved key
+		MakePublic  bool   `json:"make_public"`
+		DryRun      bool   `json:"dry_run"`
+		FullClone   bool   `json:"full_clone"`
+		SkipSystemd bool   `json:"skip_systemd"`
+		APIKey      string `json:"api_key"` // optional; falls back to saved key
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -198,13 +198,13 @@ func (s *Server) handleDeployCurrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sent := 0
+
 	// If the run already finished (race: pipeline ran fast, SSE connected
 	// late), replay all events + the finished event immediately.
 	if run.IsDone() {
-		for _, e := range run.SnapshotEvents() {
-			if !writeEvent(e) {
-				return
-			}
+		if !writePendingDeployEvents(run.SnapshotEvents(), &sent, writeEvent) {
+			return
 		}
 		final := map[string]any{
 			"type":            "finished",
@@ -219,18 +219,19 @@ func (s *Server) handleDeployCurrent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Replay what we have, then follow until done.
-	sent := 0
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		events := run.SnapshotEvents()
-		for ; sent < len(events); sent++ {
-			if !writeEvent(events[sent]) {
-				return
-			}
+		if !writePendingDeployEvents(run.SnapshotEvents(), &sent, writeEvent) {
+			return
 		}
 		select {
 		case <-run.Done():
+			// The run may emit its failure immediately before closing Done.
+			// Flush those final events before sending the terminal frame.
+			if !writePendingDeployEvents(run.SnapshotEvents(), &sent, writeEvent) {
+				return
+			}
 			final := map[string]any{
 				"type":            "finished",
 				"status":          run.Status(),
@@ -248,6 +249,15 @@ func (s *Server) handleDeployCurrent(w http.ResponseWriter, r *http.Request) {
 		case <-ticker.C:
 		}
 	}
+}
+
+func writePendingDeployEvents(events []deploy.Event, sent *int, writeEvent func(any) bool) bool {
+	for ; *sent < len(events); (*sent)++ {
+		if !writeEvent(events[*sent]) {
+			return false
+		}
+	}
+	return true
 }
 
 // handleDeployCancel cancels the in-flight run.
