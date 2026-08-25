@@ -14,7 +14,6 @@ const (
 	sshPort    = 22
 	sshDialTo  = 10 * time.Second
 	exedevUser = "exedev"
-	rootUser   = "root"
 )
 
 // sshTarget is a reachable SSH endpoint plus the user we authenticated as.
@@ -45,25 +44,21 @@ func parseSigner(privPath string) (ssh.Signer, error) {
 	return ssh.ParsePrivateKey(pem)
 }
 
-// connectWithUserLadder tries exedev then root, returning whichever works.
-// The first successful username wins for all later operations.
-func (r *Run) connectWithUserLadder(host, privPath string) (*sshTarget, error) {
+// connectAsExedev connects with the exe.dev SSH user documented for VMs.
+func (r *Run) connectAsExedev(host, privPath string) (*sshTarget, error) {
 	signer, err := parseSigner(privPath)
 	if err != nil {
 		return nil, fmt.Errorf("parsing deploy key: %w", err)
 	}
-	for _, user := range []string{exedevUser, rootUser} {
-		t := &sshTarget{host: host, user: user, signer: signer}
-		client, err := t.dial()
-		if err != nil {
-			r.emitf("info", "ssh", "SSH as %s failed: %v", user, err)
-			continue
-		}
-		r.emitf("success", "ssh", "Connected as %s@%s", user, host)
-		client.Close()
-		return t, nil
+	t := &sshTarget{host: host, user: exedevUser, signer: signer}
+	client, err := t.dial()
+	if err != nil {
+		r.emitf("info", "ssh", "SSH as %s failed: %v", exedevUser, err)
+		return nil, fmt.Errorf("could not SSH to %s as %s: %w", host, exedevUser, err)
 	}
-	return nil, fmt.Errorf("could not SSH to %s as %s or %s", host, exedevUser, rootUser)
+	r.emitf("success", "ssh", "Connected as %s@%s", exedevUser, host)
+	client.Close()
+	return t, nil
 }
 
 // runOutput runs a command over an existing client.
