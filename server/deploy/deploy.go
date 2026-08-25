@@ -134,6 +134,10 @@ func (m *Manager) Start(apiKey, vmName, image, projectDir string, port int, make
 	if err := ValidateVMName(vmName); err != nil {
 		return nil, err
 	}
+	image = strings.TrimSpace(image)
+	if image != "" && (strings.HasPrefix(image, "-") || strings.ContainsAny(image, " \t\r\n")) {
+		return nil, fmt.Errorf("image must be a single container image reference without whitespace or leading flags")
+	}
 	if port != 0 && (port < 3000 || port > 9999) {
 		return nil, fmt.Errorf("app port must be between 3000 and 9999 (the proxied range), or empty")
 	}
@@ -144,14 +148,14 @@ func (m *Manager) Start(apiKey, vmName, image, projectDir string, port int, make
 	if fullClone && !FullCloneSupported() {
 		return nil, fmt.Errorf("full state clone requires a debian/ubuntu amd64 source VM; this host is %s", SourceOSLabel())
 	}
-		rep, err := AnalyzeProject(abs)
+	rep, err := AnalyzeProject(abs)
 	if err != nil {
 		return nil, fmt.Errorf("analyzing project: %w", err)
 	}
 	dstDir := "/home/exedev/" + filepath.Base(abs)
 	run := &Run{
 		VMName:        vmName,
-		Image:         strings.TrimSpace(image),
+		Image:         image,
 		ProjectDir:    abs,
 		DstProjectDir: dstDir,
 		Port:          port,
@@ -256,6 +260,9 @@ func validateProjectDir(dir string) (string, error) {
 	abs, err := filepathAbs(dir)
 	if err != nil {
 		return "", fmt.Errorf("invalid project directory: %w", err)
+	}
+	if abs == string(filepath.Separator) {
+		return "", fmt.Errorf("the filesystem root cannot be deployed as a project")
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
