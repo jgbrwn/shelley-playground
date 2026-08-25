@@ -1,6 +1,8 @@
 package deploy
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -81,7 +83,7 @@ func TestValidateAPIKey(t *testing.T) {
 
 func TestSetupScriptInstallsKey(t *testing.T) {
 	s := setupScript("ssh-ed25519 AAAA test")
-	for _, want := range []string{"/home/exedev", "root", "authorized_keys", "useradd -M", "id exedev"} {
+	for _, want := range []string{"/home/exedev", "root", "authorized_keys", "useradd -M", "id exedev", "usermod -s /bin/bash exedev"} {
 		if !contains(s, want) {
 			t.Errorf("setup script missing %q", want)
 		}
@@ -97,6 +99,16 @@ func contains(s, sub string) bool {
 		}
 		return false
 	})()
+}
+
+func TestSetupScriptSyntax(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "setup.sh")
+	if err := os.WriteFile(path, []byte(setupScript("ssh-ed25519 AAAA test")), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runLocal("sh", "-n", path); err != nil {
+		t.Fatalf("setup script has invalid shell syntax: %v\n%s", err, out)
+	}
 }
 
 func TestFindPasswdEntry(t *testing.T) {
