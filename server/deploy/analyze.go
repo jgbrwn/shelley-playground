@@ -32,7 +32,7 @@ type ProjectReport struct {
 // provides them on Ubuntu/Debian.
 var knownToolPackages = map[string]string{
 	"python3": "python3", "pip3": "python3-pip", "uv": "",
-	"node": "nodejs", "npm": "npm",
+	"node": "", "npm": "", // provisioned via NodeSource installer, not apt
 	"go":    "golang-go",
 	"cargo": "cargo", "rustc": "rustc",
 	"nginx": "nginx", "caddy": "caddy",
@@ -145,8 +145,8 @@ func AnalyzeProject(dir string) (*ProjectReport, error) {
 			mgr, manifest = "bun", "bun.lockb"
 		}
 		addLang(LangSpec{Name: "node", Manager: mgr, Manifest: manifest})
-		addPkg("nodejs")
-		addPkg("npm")
+		// nodejs/npm are provisioned via the NodeSource installer in
+		// reconcileFromReport, not apt — apt's nodejs is often outdated.
 	}
 
 	// Makefile presence implies build-essential (make + gcc/cc toolchain).
