@@ -34,6 +34,8 @@ func (r *Run) pipeline(c *execClient) {
 	if r.DryRun {
 		r.emit("warn", "dry-run", "Dry run: stopping before VM creation.")
 		r.emitf("info", "plan", "Would create VM %q (image: %s)", r.VMName, imageLabel(r.Image))
+		r.emit("info", "plan", "Would verify the destination is Ubuntu/Debian-based and has required apt/systemd capabilities.")
+		r.emitf("info", "plan", "Would require %s on the new VM to be absent or empty (never overwrite a symlink/non-empty app tree)", r.DstProjectDir)
 		r.emitf("info", "plan", "Would rsync %s → %s on the new VM", r.ProjectDir, r.DstProjectDir)
 		r.emitf("info", "plan", "Would install project dependencies on destination (%s)", depInstallPlan(r.Report))
 		var unitPlan *systemdPlan
@@ -58,6 +60,9 @@ func (r *Run) pipeline(c *execClient) {
 		}
 		if r.Port != 0 {
 			r.emitf("info", "plan", "Would route the VM's proxy to app port %d and configure services for it", r.Port)
+			if !r.SkipSystemd {
+				r.emitf("info", "plan", "Would fail deployment unless port %d starts on loopback (127.0.0.1 or ::1).", r.Port)
+			}
 		}
 		if r.MakePublic {
 			r.emit("info", "plan", "Would share the VM publicly (share set-public)")
@@ -156,6 +161,20 @@ func (r *Run) pipeline(c *execClient) {
 		r.emitf("success", "ssh", "Connected as %s@%s", exedevUser, host)
 	}
 	defer client.Close()
+
+	if err := r.preflightDestination(ctx, &remoteExec{client: client, user: target.user}); err != nil {
+		errMsg = err.Error()
+		r.emit("error", "preflight", errMsg)
+		return
+	}
+
+	// Refuse to clobber application state preloaded by a custom image. This
+	// deploy flow owns only a new or empty destination directory.
+	if err := r.prepareDestination(ctx, &remoteExec{client: client, user: target.user}); err != nil {
+		errMsg = err.Error()
+		r.emit("error", "rsync", errMsg)
+		return
+	}
 
 	// Step 6: rsync project.
 	if err := r.rsyncProject(ctx, target.user); err != nil {
