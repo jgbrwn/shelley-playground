@@ -75,28 +75,41 @@ func firstWord(s string) string {
 	return s
 }
 
-const maxSetupScriptBytes = 10 * 1024
-
-// inlineSetupScript returns a quoted --setup-script argument for the HTTPS
-// API. Unlike SSH, POST /exec has no stdin: the script must travel in the
-// command itself with newline escape sequences.
-func inlineSetupScript(script string) (string, error) {
-	if len(script) > maxSetupScriptBytes {
-		return "", fmt.Errorf("setup script exceeds exe.dev's 10 KiB limit")
-	}
-	return strconv.Quote(script), nil
-}
-
-func newVMCommand(vmName, image, pubKey string) (string, error) {
-	setupArg, err := inlineSetupScript(setupScript(pubKey))
-	if err != nil {
-		return "", err
-	}
+func newVMCommand(vmName, image string) string {
 	cmd := "new --name=" + vmName + " --json"
 	if image != "" {
 		cmd += " --image=" + image
 	}
-	return cmd + " --setup-script=" + setupArg, nil
+	return cmd
+}
+
+// SSHKey describes an account SSH public key returned by ssh-key list.
+type SSHKey struct {
+	PublicKey string `json:"public_key"`
+}
+
+// RegisterSSHKey ensures publicKey is registered with exe.dev. The private
+// key never leaves this VM; exe.dev only receives its public counterpart.
+func (c *execClient) RegisterSSHKey(ctx context.Context, publicKey string) (bool, error) {
+	out, err := c.exec(ctx, "ssh-key list --json")
+	if err != nil {
+		return false, fmt.Errorf("listing registered SSH keys: %w", err)
+	}
+	var result struct {
+		Keys []SSHKey `json:"ssh_keys"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		return false, fmt.Errorf("unexpected ssh-key list output: %w", err)
+	}
+	for _, key := range result.Keys {
+		if key.PublicKey == publicKey {
+			return false, nil
+		}
+	}
+	if _, err := c.exec(ctx, "ssh-key add "+strconv.Quote(publicKey)); err != nil {
+		return false, fmt.Errorf("registering deploy SSH key: %w", err)
+	}
+	return true, nil
 }
 
 // VM describes one VM from `ls --json`.
