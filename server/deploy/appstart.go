@@ -19,30 +19,30 @@ type appStart struct {
 // entry point exists.
 func detectAppStart(projectDir string, report *ProjectReport, port int) (appStart, error) {
 	if command := procfileWebCommand(filepath.Join(projectDir, "Procfile")); command != "" {
-		return appStart{command: command, source: "Procfile web process"}, nil
+		return appStart{command: loopbackCommand(command), source: "Procfile web process"}, nil
 	}
 
 	for _, name := range []string{"start.sh", "run.sh", "serve.sh"} {
 		path := filepath.Join(projectDir, name)
 		info, err := os.Stat(path)
 		if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
-			return appStart{command: "./" + name, source: name}, nil
+			return appStart{command: loopbackCommand("./" + name), source: name}, nil
 		}
 	}
 
 	if manager, ok := packageStartManager(filepath.Join(projectDir, "package.json"), report); ok {
-		return appStart{command: manager + " run start", source: "package.json start script"}, nil
+		return appStart{command: loopbackCommand(manager + " run start"), source: "package.json start script"}, nil
 	}
 
 	if module, variable := findPythonWebApp(projectDir, "FastAPI"); module != "" {
-		command := pythonRunner(report) + " -m uvicorn " + module + ":" + variable + " --host 0.0.0.0"
+		command := pythonRunner(report) + " -m uvicorn " + module + ":" + variable + " --host 127.0.0.1"
 		if port != 0 {
 			command += fmt.Sprintf(" --port %d", port)
 		}
 		return appStart{command: command, source: "FastAPI application"}, nil
 	}
 	if module, variable := findPythonWebApp(projectDir, "Flask"); module != "" {
-		command := pythonRunner(report) + " -m flask --app " + module + ":" + variable + " run --host 0.0.0.0"
+		command := pythonRunner(report) + " -m flask --app " + module + ":" + variable + " run --host 127.0.0.1"
 		if port != 0 {
 			command += fmt.Sprintf(" --port %d", port)
 		}
@@ -54,7 +54,7 @@ func detectAppStart(projectDir string, report *ProjectReport, port int) (appStar
 			appPort = 8000
 		}
 		return appStart{
-			command: fmt.Sprintf("%s manage.py runserver 0.0.0.0:%d", pythonRunner(report), appPort),
+			command: fmt.Sprintf("%s manage.py runserver 127.0.0.1:%d", pythonRunner(report), appPort),
 			source:  "Django manage.py",
 		}, nil
 	}
@@ -70,12 +70,38 @@ func detectAppStart(projectDir string, report *ProjectReport, port int) (appStar
 			appPort = 8000
 		}
 		return appStart{
-			command: fmt.Sprintf("php -S 0.0.0.0:%d -t public", appPort),
+			command: fmt.Sprintf("php -S 127.0.0.1:%d -t public", appPort),
 			source:  "public/index.php",
 		}, nil
 	}
 
 	return appStart{}, fmt.Errorf("no project systemd unit or supported app start command found; add a Procfile web entry, package.json start script, executable start.sh/run.sh/serve.sh, or select Skip systemd")
+}
+
+func loopbackCommand(command string) string {
+	for _, pattern := range []struct {
+		from string
+		to   string
+	}{
+		{"HOST=0.0.0.0", "HOST=127.0.0.1"},
+		{"BIND_HOST=0.0.0.0", "BIND_HOST=127.0.0.1"},
+		{"FLASK_RUN_HOST=0.0.0.0", "FLASK_RUN_HOST=127.0.0.1"},
+		{"UVICORN_HOST=0.0.0.0", "UVICORN_HOST=127.0.0.1"},
+		{"HOST=::", "HOST=127.0.0.1"},
+		{"--host ::", "--host 127.0.0.1"},
+		{"--host=::", "--host=127.0.0.1"},
+		{"--bind ::", "--bind 127.0.0.1"},
+		{"--bind=::", "--bind=127.0.0.1"},
+		{"--host 0.0.0.0", "--host 127.0.0.1"},
+		{"--host=0.0.0.0", "--host=127.0.0.1"},
+		{"--bind 0.0.0.0", "--bind 127.0.0.1"},
+		{"--bind=0.0.0.0", "--bind=127.0.0.1"},
+		{"0.0.0.0:", "127.0.0.1:"},
+		{"[::]:", "127.0.0.1:"},
+	} {
+		command = strings.ReplaceAll(command, pattern.from, pattern.to)
+	}
+	return command
 }
 
 func procfileWebCommand(path string) string {
@@ -180,6 +206,9 @@ Type=simple
 User=exedev
 WorkingDirectory=%s
 Environment=HOME=/home/exedev
+Environment=HOST=127.0.0.1
+Environment=FLASK_RUN_HOST=127.0.0.1
+Environment=UVICORN_HOST=127.0.0.1
 Environment=PATH=/home/exedev/.local/bin:/home/exedev/.bun/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/bin/sh -lc %s
 Restart=on-failure
