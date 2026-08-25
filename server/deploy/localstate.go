@@ -51,8 +51,11 @@ func localUserCrontab() (string, error) {
 	return runLocal("crontab", "-l")
 }
 
-// localCustomUnits returns non-default systemd unit files in
-// /etc/systemd/system, with their enabled/active state.
+// localProjectUnits returns regular unit files in /etc/systemd/system that
+// directly reference the project, plus regular companion units (for example a
+// timer) that reference one of those project units. Symlinks are deliberately
+// ignored: distro/package aliases in this directory commonly point back into
+// /lib/systemd/system and are not user-authored app units.
 type localUnit struct {
 	name    string // e.g. "myapp.service"
 	content string
@@ -60,63 +63,77 @@ type localUnit struct {
 	active  bool
 }
 
-var builtinUnitPrefixes = []string{
-	"multi-user.target.wants/", "sockets.target.wants/", "timers.target.wants/",
-	"default.target.wants/", "sysinit.target.wants/", "graphical.target.wants/",
-	"network-online.target.wants/",
+func localProjectUnits(projectDir string) ([]localUnit, error) {
+	return projectUnitsInDir("/etc/systemd/system", projectDir, true)
 }
 
-func isBuiltinWantsDir(name string) bool {
-	for _, p := range builtinUnitPrefixes {
-		if strings.HasPrefix(name, p) {
+func projectUnitsInDir(dir, projectDir string, queryState bool) ([]localUnit, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var candidates []localUnit
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !isSupportedUnitName(entry.Name()) {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("reading systemd unit %s: %w", entry.Name(), err)
+		}
+		candidates = append(candidates, localUnit{name: entry.Name(), content: string(content)})
+	}
+
+	selected := map[string]bool{}
+	for _, unit := range candidates {
+		if strings.Contains(unit.content, projectDir) {
+			selected[unit.name] = true
+		}
+	}
+	// Include companion units that name a selected unit, iterating to support
+	// small dependency chains without ever pulling in unrelated units.
+	for changed := true; changed; {
+		changed = false
+		for _, unit := range candidates {
+			if selected[unit.name] {
+				continue
+			}
+			for name := range selected {
+				if strings.Contains(unit.content, name) {
+					selected[unit.name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+
+	var units []localUnit
+	for _, unit := range candidates {
+		if !selected[unit.name] {
+			continue
+		}
+		if queryState {
+			unit.enabled = unitEnabled(unit.name)
+			unit.active = unitActive(unit.name)
+		}
+		units = append(units, unit)
+	}
+	sort.Slice(units, func(i, j int) bool { return units[i].name < units[j].name })
+	return units, nil
+}
+
+func isSupportedUnitName(name string) bool {
+	for _, suffix := range []string{".service", ".timer", ".socket", ".path"} {
+		if strings.HasSuffix(name, suffix) {
 			return true
 		}
 	}
 	return false
-}
-
-func localCustomUnits() []localUnit {
-	const dir = "/etc/systemd/system"
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var units []localUnit
-	seen := map[string]bool{}
-	collect := func(name, fullPath string) {
-		if seen[name] || !strings.HasSuffix(name, ".service") && !strings.HasSuffix(name, ".timer") && !strings.HasSuffix(name, ".mount") {
-			return
-		}
-		content, err := os.ReadFile(fullPath)
-		if err != nil {
-			return
-		}
-		u := localUnit{name: name, content: string(content)}
-		u.enabled = unitEnabled(name)
-		u.active = unitActive(name)
-		units = append(units, u)
-		seen[name] = true
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() {
-			if isBuiltinWantsDir(name+"/") || strings.HasSuffix(name, ".wants") || strings.HasSuffix(name, ".requires") {
-				continue
-			}
-			// Non-standard subdirectory: look one level deep for units.
-			sub, err := os.ReadDir(filepath.Join(dir, name))
-			if err != nil {
-				continue
-			}
-			for _, se := range sub {
-				collect(se.Name(), filepath.Join(dir, name, se.Name()))
-			}
-			continue
-		}
-		collect(name, filepath.Join(dir, name))
-	}
-	sort.Slice(units, func(i, j int) bool { return units[i].name < units[j].name })
-	return units
 }
 
 func systemctlIs(query, unit string) bool {

@@ -43,8 +43,8 @@ The modal collects:
 | **Make Public** | Runs `share set-public` at the end; new VMs are private by default |
 | **exe.dev API key** | Stored in the Shelley settings table (`deploy_api_key`), returned to the UI only masked; validated live via `POST https://exe.dev/exec` (`whoami`). Create with `ssh exe.dev ssh-key generate-api-key --cmds=whoami,ls,new,share\ port,share\ set-public,rm --exp=90d` — the `share port` and `share set-public` permissions are needed for proxy routing, `rm` for VM cleanup. The SSH key is installed via `--setup-script` on first boot (no `ssh-key` API permission needed). |
 | **Dry run** | Validates the key and prints the plan without creating anything |
-| **Full state clone** | Opt-in; when on, diffs **all** apt/pip/npm/systemd/users/crontabs src→dst. Off by default (= minimal/project-scoped mode, see below) |
-| **Skip systemd** | Opt-in; when checked, the deployer won't copy or create systemd units on the destination — you handle that yourself. Default is to copy/create systemd units. If a source systemd unit references the project directory, the deployer uses it (with path/port rewriting); otherwise it copies all custom units. |
+| **Full state clone** | Opt-in; when on, diffs **all** apt/pip/npm packages plus users and the user crontab src→dst. Off by default (= minimal/project-scoped mode, see below) |
+| **Skip systemd** | Opt-in; when checked, the deployer performs no systemd discovery or actions. Otherwise it copies only regular source units that directly reference the project (plus their companion timers/sockets/paths), rewriting source path/port references. If none exists, it generates one app service from a detected Procfile, start script, package `start` script, or supported web entry point. It never copies unrelated source units. |
 
 A live **SSE console** streams progress inside the modal. The run's events are also persisted to `deploy_runs` so the **Current run** can be reopened after a reload.
 
@@ -52,11 +52,11 @@ A live **SSE console** streams progress inside the modal. The run's events are a
 
 * **Minimal (default)** — only the packages and runtimes your project actually needs, as inferred by `AnalyzeProject`:
   manifests (`requirements.txt`, `pyproject.toml` + `uv.lock`, `package.json` + lockfiles, `go.mod`, `Cargo.toml`, `Gemfile`, `composer.json`, `pom.xml`, `build.gradle`), shebang interpreters, and built ELF binaries (with a destination `ldd` check that reports missing shared libraries). Per-package retry + a `uv` astral.sh-installer fallback.
-* **Full state clone** — wholesale src→dst diff of apt, global pip/npm, custom `systemd` units, extra users and crontabs. **Gated on host OS**: only offered on `linux/amd64` Debian/Ubuntu (`/etc/os-release`); on macOS/arm64 the checkbox is disabled with an explanation. Python venvs are always excluded from rsync and rebuilt on the destination.
+* **Full state clone** — wholesale src→dst diff of apt and global pip/npm packages, plus extra users and the source user's crontab. Systemd remains project-scoped even in this mode. **Gated on host OS**: only offered on `linux/amd64` Debian/Ubuntu (`/etc/os-release`); on macOS/arm64 the checkbox is disabled with an explanation. Python venvs are always excluded from rsync and rebuilt on the destination.
 
 #### Dependency report
 
-Every deploy (including dry runs) generates a copy-pastable **markdown dependency report** that is streamed into the console, attached to the finished SSE event, and shown in the modal with a **Copy markdown** button. Also available without starting a deploy via
+Every deploy (including dry runs) generates a copy-pastable **markdown dependency report** that is streamed into the console, attached to the finished SSE event, and shown in the modal with a **Copy markdown** button. Completed dry runs also expose a **Copy dry run** button for the complete timestamped plan/transcript. The dependency report is also available without starting a deploy via
 
 ```
 GET /api/deploy/analyze?dir=/home/exedev/playground/my-cool-app
