@@ -7,67 +7,76 @@
   <Modal :is-open="isOpen" title="Deploy project to a new exe.dev VM" @close="onClose">
     <div class="deploy-form">
       <div class="deploy-field">
-        <label for="deploy-vm-name">New VM name</label>
+        <label for="deploy-vm-name">New VM name <span class="deploy-required">*</span></label>
         <InputText
           id="deploy-vm-name"
           v-model="vmName"
           placeholder="my-app-prod"
-          :disabled="running"
+          :disabled="starting || running"
+          :invalid="Boolean(vmNameError)"
+          aria-required="true"
           fluid
           :dt="inputFieldDt"
         />
-        <small class="deploy-hint">Lowercase letters, digits and hyphens. Accessible at https://name.exe.xyz</small>
+        <small v-if="vmNameError" class="deploy-field-error">{{ vmNameError }}</small>
+        <small v-else class="deploy-hint">Lowercase letters, digits and hyphens. Accessible at https://name.exe.xyz</small>
       </div>
 
       <div class="deploy-field">
-        <label for="deploy-image">Image</label>
+        <label for="deploy-image">Image <span class="deploy-optional">(optional)</span></label>
         <InputText
           id="deploy-image"
           v-model="image"
-          placeholder="(default: exeuntu)"
-          :disabled="running"
+          placeholder="(standard exeuntu)"
+          :disabled="starting || running"
+          :invalid="Boolean(imageError)"
           fluid
           :dt="inputFieldDt"
         />
-        <small class="deploy-hint">Leave blank for the standard exeuntu image. Must be Ubuntu/Debian-based — the deployer uses apt, dpkg, and systemd to reconcile packages and services on the destination.</small>
+        <small v-if="imageError" class="deploy-field-error">{{ imageError }}</small>
+        <small v-else class="deploy-hint">Leave blank to use standard exeuntu. Custom images must be Ubuntu/Debian-based.</small>
       </div>
 
       <div class="deploy-field">
-        <label for="deploy-dir">Project directory</label>
+        <label for="deploy-dir">Project directory <span class="deploy-required">*</span></label>
         <InputText
           id="deploy-dir"
           v-model="projectDir"
           placeholder="/home/exedev/playground/my-project"
-          :disabled="running"
+          :disabled="starting || running"
+          :invalid="Boolean(projectDirError)"
+          aria-required="true"
           fluid
           :dt="inputFieldDt"
         />
-        <small class="deploy-hint">Copied (rsync) to /home/exedev/&lt;project-name&gt; on the new VM.</small>
+        <small v-if="projectDirError" class="deploy-field-error">{{ projectDirError }}</small>
+        <small v-else class="deploy-hint">Copied to an empty /home/exedev/&lt;project-name&gt; directory on the new VM.</small>
       </div>
 
       <div class="deploy-field-row">
         <div class="deploy-field">
-          <label for="deploy-port">App port</label>
+          <label for="deploy-port">App port <span class="deploy-optional">(optional)</span></label>
           <InputText
             id="deploy-port"
             v-model="port"
             :placeholder="detectedPorts.length ? detectedPorts.join(', ') + ' detected' : '8000'"
-            :disabled="running"
+            :disabled="starting || running"
+            :invalid="Boolean(portError)"
             fluid
             :dt="inputFieldDt"
           />
-          <small class="deploy-hint">
-            {{ portHint }}
+          <small :class="portError ? 'deploy-field-error' : 'deploy-hint'">
+            {{ portError || portHint }}
           </small>
         </div>
         <label class="deploy-public">
-          <input type="checkbox" v-model="makePublic" :disabled="running" />
+          <input type="checkbox" v-model="makePublic" :disabled="starting || running" />
           Make Public
         </label>
       </div>
 
       <div class="deploy-field">
-        <label for="deploy-key">exe.dev API key</label>
+        <label for="deploy-key">exe.dev API key <span class="deploy-required">*</span></label>
         <Password
           v-if="!useSavedKey"
           id="deploy-key"
@@ -75,15 +84,18 @@
           :feedback="false"
           toggle-mask
           placeholder="exe1.… or exe0.…"
-          :disabled="running"
+          :disabled="starting || running"
+          :invalid="Boolean(apiKeyError)"
+          aria-required="true"
           fluid
           :dt="inputFieldDt"
         />
         <div v-else class="deploy-saved-key">
-          <code>{{ maskedKey || "(none saved)" }}</code>
-          <Button label="Replace" text size="small" :disabled="running" @click="replaceKey" />
+          <code>{{ maskedKey }}</code>
+          <Button label="Replace" text size="small" :disabled="starting || running" @click="replaceKey" />
         </div>
-        <small class="deploy-hint">
+        <small v-if="apiKeyError" class="deploy-field-error">{{ apiKeyError }}</small>
+        <small v-else class="deploy-hint">
           Create one with
           <code>ssh exe.dev ssh-key generate-api-key --cmds=whoami,ls,new,share\ port,share\ set-public,rm --exp=90d</code>.
           {{ savedHint }}
@@ -91,14 +103,14 @@
       </div>
 
       <label class="deploy-dryrun">
-        <input type="checkbox" v-model="dryRun" :disabled="running" />
+        <input type="checkbox" v-model="dryRun" :disabled="starting || running" />
         Dry run — validates the key and generates the dependency report (markdown, copy-pastable) without creating anything
       </label>
 
       <div>
         <label class="deploy-dryrun" :class="{ 'deploy-disabled': !fullCloneSupported }"
           :title="fullCloneSupported ? '' : `Full state clone requires a debian/ubuntu amd64 source host (this host: ${sourceOS})`">
-          <input type="checkbox" v-model="fullClone" :disabled="running || !fullCloneSupported" />
+          <input type="checkbox" v-model="fullClone" :disabled="starting || running || !fullCloneSupported" />
           Full state clone — mirror ALL packages from source OS (apt/pip/npm wholesale)
         </label>
         <small v-if="!fullCloneSupported" class="deploy-hint">
@@ -110,8 +122,8 @@
       </div>
 
       <label class="deploy-dryrun">
-        <input type="checkbox" v-model="skipSystemd" :disabled="running" />
-        Skip systemd — don't copy or create systemd units on the destination (handle it yourself)
+        <input type="checkbox" v-model="skipSystemd" :disabled="starting || running" />
+        Skip systemd — don't copy/create units or enforce loopback binding (handle both yourself)
       </label>
 
       <div v-if="formError" class="deploy-error">{{ formError }}</div>
@@ -121,7 +133,7 @@
           :label="running ? 'Deploying…' : dryRun ? 'Run dry run' : 'Deploy'"
           icon="pi pi-upload"
           :loading="starting || running"
-          :disabled="starting || running"
+          :disabled="starting || running || !formValid"
           @click="start"
         />
         <Button
@@ -194,7 +206,7 @@ const apiKey = ref("");
 const port = ref("");
 const makePublic = ref(false);
 const detectedPorts = ref<number[]>([]);
-const useSavedKey = ref(true);
+const useSavedKey = ref(false);
 const maskedKey = ref("");
 const dryRun = ref(false);
 const starting = ref(false);
@@ -213,6 +225,52 @@ const consoleRef = ref<HTMLElement | null>(null);
 let es: EventSource | null = null;
 
 const savedHint = ref("");
+
+const vmNameError = computed(() => {
+  const value = vmName.value.trim();
+  if (!value) return "VM name is required.";
+  if (value.length > 40) return "VM name must be 40 characters or fewer.";
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value)) {
+    return "Use lowercase letters, digits, and internal hyphens only.";
+  }
+  return "";
+});
+
+const imageError = computed(() => {
+  const value = image.value.trim();
+  if (!value) return "";
+  if (value.startsWith("-") || /\s/.test(value)) return "Image must be one container image reference without whitespace.";
+  return "";
+});
+
+const projectDirError = computed(() => {
+  const value = projectDir.value.trim();
+  if (!value) return "Project directory is required.";
+  if (!value.startsWith("/")) return "Project directory must be an absolute path.";
+  if (value === "/") return "The filesystem root cannot be deployed.";
+  return "";
+});
+
+const apiKeyError = computed(() => {
+  if (useSavedKey.value) return maskedKey.value ? "" : "An exe.dev API key is required.";
+  const value = apiKey.value.trim();
+  if (!value) return "An exe.dev API key is required.";
+  if (!value.startsWith("exe") || !value.includes(".") || /\s/.test(value)) return "Enter a valid exe.dev API token.";
+  return "";
+});
+
+const portError = computed(() => {
+  const value = port.value.trim();
+  if (!value) return "";
+  if (!/^\d+$/.test(value)) return "App port must contain digits only.";
+  const parsed = Number(value);
+  if (parsed < 3000 || parsed > 9999) return "App port must be between 3000 and 9999.";
+  return "";
+});
+
+const formValid = computed(
+  () => !vmNameError.value && !imageError.value && !projectDirError.value && !apiKeyError.value && !portError.value,
+);
 
 const portHint = computed(() => {
   const value = port.value.trim();
@@ -233,6 +291,7 @@ watch(
     try {
       const s = await deployApi.getSettings();
       maskedKey.value = s.api_key_masked;
+      useSavedKey.value = Boolean(s.api_key_masked);
       image.value = s.default_image;
       if (!projectDir.value && props.suggestedDir) projectDir.value = props.suggestedDir;
       if (s.detected_app_ports?.length) {
@@ -254,7 +313,12 @@ function replaceKey() {
 }
 
 async function start() {
+  if (starting.value || running.value) return;
   formError.value = "";
+  if (!formValid.value) {
+    formError.value = "Complete the required fields and correct the highlighted values.";
+    return;
+  }
   starting.value = true;
   events.value = [];
   finished.value = "";
@@ -262,7 +326,7 @@ async function start() {
   markdownReport.value = "";
   try {
     // If the user typed a new key, save it first so future deploys reuse it.
-    if (!useSavedKey.value && apiKey.value.trim()) {
+    if (!useSavedKey.value) {
       await deployApi.putSettings(apiKey.value.trim());
       useSavedKey.value = true;
       const s = await deployApi.getSettings();
@@ -456,6 +520,18 @@ function onClose() {
 .deploy-hint {
   color: var(--p-text-muted-color, #888);
   font-size: 0.78rem;
+}
+.deploy-field-error,
+.deploy-required {
+  color: var(--p-red-500, #ef4444);
+}
+.deploy-field-error {
+  font-size: 0.78rem;
+}
+.deploy-optional {
+  color: var(--p-text-muted-color, #888);
+  font-size: 0.75rem;
+  font-weight: 400;
 }
 .deploy-saved-key {
   display: flex;
