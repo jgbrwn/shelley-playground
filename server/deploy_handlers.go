@@ -323,7 +323,7 @@ func (s *Server) handleDeployDeleteVM(w http.ResponseWriter, r *http.Request) {
 		// The exe.dev API returns a permission error when the key lacks the
 		// 'rm' command. Give the user actionable guidance.
 		if strings.Contains(strings.ToLower(msg), "permission") || strings.Contains(strings.ToLower(msg), "denied") || strings.Contains(strings.ToLower(msg), "forbidden") {
-			msg = fmt.Sprintf("the API key may not have permission to delete VMs (rm). Create one with --cmds=whoami,ls,new,ssh-key\\ list,ssh-key\\ add,share\\ port,share\\ set-public,rm: %s", msg)
+			msg = fmt.Sprintf("the API key may not have permission to delete VMs (rm). Create one with --cmds=whoami,ls,new,ssh-key\\ add,share\\ port,share\\ set-public,rm: %s", msg)
 		}
 		http.Error(w, msg, http.StatusBadGateway)
 		return
