@@ -55,6 +55,7 @@ jobs:
           fi
 
       - name: Rebase onto upstream/main
+        id: rebase
         if: steps.check.outputs.rebased == 'true'
         run: |
           set -e
@@ -147,7 +148,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Notify on conflict
-        if: failure() && steps.check.outputs.rebased == 'true'
+        if: steps.rebase.outcome == 'failure'
         run: |
           echo "::error::Automatic rebase onto upstream/main hit conflicts. Rebase manually: git fetch upstream main && git rebase upstream/main, resolve, then push."
           exit 1
