@@ -58,8 +58,91 @@ jobs:
         id: rebase
         if: steps.check.outputs.rebased == 'true'
         run: |
-          set -e
-          git rebase upstream/main
+          set -euo pipefail
+
+          resolve_known_conflicts() {
+            conflicts=$(git diff --name-only --diff-filter=U)
+            if [ "$conflicts" != "server/server.go" ]; then
+              echo "Unexpected rebase conflicts:"
+              printf '%s\n' "$conflicts"
+              return 1
+            fi
+
+            python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("server/server.go")
+          lines = path.read_text().splitlines(keepends=True)
+          merged = []
+          i = 0
+          known_assignments = {
+              "s.integrationSkills = discoverIntegrationSkillsAtStartup(logger)",
+              "s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun",
+          }
+
+          while i < len(lines):
+              if not lines[i].startswith("<<<<<<< "):
+                  merged.append(lines[i])
+                  i += 1
+                  continue
+
+              i += 1
+              ours = []
+              while i < len(lines) and not lines[i].startswith("=======\n"):
+                  ours.append(lines[i])
+                  i += 1
+              if i == len(lines):
+                  raise SystemExit("unterminated rebase conflict")
+
+              i += 1
+              theirs = []
+              while i < len(lines) and not lines[i].startswith(">>>>>>> "):
+                  theirs.append(lines[i])
+                  i += 1
+              if i == len(lines):
+                  raise SystemExit("unterminated rebase conflict")
+              i += 1
+
+              content = [line for line in ours + theirs if line.strip()]
+              if not content:
+                  raise SystemExit("empty rebase conflict")
+
+              def safe(line):
+                  stripped = line.strip()
+                  return (
+                      (stripped.startswith('"') and stripped.endswith('"'))
+                      or stripped in known_assignments
+                  )
+
+              if not all(safe(line) for line in content):
+                  raise SystemExit("server/server.go conflict is not a known additive conflict")
+
+              if all(line.strip().startswith('"') for line in content):
+                  content.sort(key=str.strip)
+
+              for line in content:
+                  if line not in merged:
+                      merged.append(line)
+
+          path.write_text("".join(merged))
+          PY
+            gofmt -w server/server.go
+            git add server/server.go
+          }
+
+          if GIT_EDITOR=true git rebase upstream/main; then
+            exit 0
+          fi
+
+          while true; do
+            if ! resolve_known_conflicts; then
+              git rebase --abort
+              exit 1
+            fi
+            if GIT_EDITOR=true git rebase --continue; then
+              break
+            fi
+          done
 
       - name: Push rebased main
         if: steps.check.outputs.rebased == 'true'
@@ -148,7 +231,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Notify on conflict
-        if: steps.rebase.outcome == 'failure'
+        if: ${{ failure() && steps.rebase.outcome == 'failure' }}
         run: |
-          echo "::error::Automatic rebase onto upstream/main hit conflicts. Rebase manually: git fetch upstream main && git rebase upstream/main, resolve, then push."
+          echo "::error::Automatic rebase onto upstream/main hit an unsupported conflict. Rebase manually: git fetch upstream main && git rebase upstream/main, resolve, then push."
           exit 1
