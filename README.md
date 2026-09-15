@@ -182,9 +182,9 @@ This fork's GitHub Actions keep releases fresh without manual intervention:
   1. Fetches `boldsoftware/shelley` `main` as `upstream`.
   2. Checks whether `upstream/main` has moved beyond the playground's merge-base.
   3. Attempts `git rebase` of the playground commits onto `upstream/main`.
-  4. On success, pushes the rebased `main`.
-  5. Generates a new `v0.N.9OCTAL` tag (same scheme as upstream) for the current HEAD, and if the tag doesn't already exist, builds UI + templates and runs **GoReleaser** to publish cross-compiled binaries (linux/darwin, amd64/arm64) directly to this repo's Releases page.
-  6. On rebase conflict, the workflow **fails loudly** (no force-push) — rebase by hand via the version dialog.
+  4. Automatically resolves the known additive `server/server.go` integration conflict; unsupported conflicts fail loudly without force-pushing.
+  5. On success, pushes the rebased `main` using the `PLAYGROUND_SYNC_TOKEN` repository secret. That token needs repository write access plus the GitHub **Workflows** permission because upstream commits can change `.github/workflows` files; the default `GITHUB_TOKEN` cannot push those changes.
+  6. Generates a new `v0.N.9OCTAL` tag (same scheme as upstream) for the current HEAD, and if the tag doesn't already exist, builds UI + templates and runs **GoReleaser** to publish cross-compiled binaries (linux/darwin, amd64/arm64) directly to this repo's Releases page.
 
 - **`.github/workflows/release.yml`** (mirrored from upstream, trimmed) triggers on push to `main` via the `Test` workflow and is the secondary release path for manual pushes. `.goreleaser.yml` is retargeted to **`jgbrwn/shelley-playground`**. The playground drops three upstream steps that don't apply to a fork: the Homebrew cask (upstream's `boldsoftware/tap` remains canonical), the headless-shell Chromium release (downloaded from upstream at build time), and the GitHub Pages version-metadata publisher.
 
