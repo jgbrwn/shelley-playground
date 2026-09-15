@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PLAYGROUND_SYNC_TOKEN }}
 
       - name: Configure git
         run: |
@@ -148,6 +148,8 @@ jobs:
         if: steps.check.outputs.rebased == 'true'
         run: |
           # The rebase rewrites history, so this is never a fast-forward.
+          # The sync token has the Workflows permission required when upstream
+          # commits change .github/workflows files.
           # --force-with-lease is safe: it only succeeds if remote main hasn't
           # changed since we fetched it (no clobbering of others' work).
           git push --force-with-lease origin HEAD:main
