@@ -15,6 +15,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: playground-upstream-sync
+  cancel-in-progress: false
+
 jobs:
   sync-and-release:
     runs-on: ubuntu-latest
@@ -156,6 +160,9 @@ jobs:
 
       - name: Check if release needed
         id: release-check
+        # A rebased push triggers Test, which triggers release.yml. Releasing
+        # here as well would race that workflow for the same tag.
+        if: steps.check.outputs.rebased != 'true'
         run: |
           set -e
           # Generate the playground tag (same scheme as upstream).
