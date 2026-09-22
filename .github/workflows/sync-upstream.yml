@@ -72,17 +72,13 @@ jobs:
               return 1
             fi
 
-            python3 <<'PY'
+            if python3 <<'PY'
           from pathlib import Path
 
           path = Path("server/server.go")
           lines = path.read_text().splitlines(keepends=True)
           merged = []
           i = 0
-          known_assignments = {
-              "s.integrationSkills = discoverIntegrationSkillsAtStartup(logger)",
-              "s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun",
-          }
 
           while i < len(lines):
               if not lines[i].startswith("<<<<<<< "):
@@ -115,7 +111,8 @@ jobs:
                   stripped = line.strip()
                   return (
                       (stripped.startswith('"') and stripped.endswith('"'))
-                      or stripped in known_assignments
+                      or stripped.startswith("s.integrationSkills = ")
+                      or stripped == "s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun"
                   )
 
               if not all(safe(line) for line in content):
@@ -130,8 +127,17 @@ jobs:
 
           path.write_text("".join(merged))
           PY
-            gofmt -w server/server.go
-            git add server/server.go
+            then
+              :
+            else
+              return 1
+            fi
+            if ! gofmt -w server/server.go; then
+              return 1
+            fi
+            if ! git add server/server.go; then
+              return 1
+            fi
           }
 
           if GIT_EDITOR=true git rebase upstream/main; then
@@ -147,6 +153,12 @@ jobs:
               break
             fi
           done
+
+          if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- .; then
+            echo "::error::Rebase left conflict markers in the tree"
+            exit 1
+          fi
+          git diff --check
 
       - name: Push rebased main
         if: steps.check.outputs.rebased == 'true'
