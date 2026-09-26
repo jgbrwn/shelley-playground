@@ -66,93 +66,136 @@ jobs:
 
           resolve_known_conflicts() {
             conflicts=$(git diff --name-only --diff-filter=U)
-            if [ "$conflicts" != "server/server.go" ]; then
-              echo "Unexpected rebase conflicts:"
-              printf '%s\n' "$conflicts"
-              return 1
-            fi
-
             if python3 <<'PY'
+          import subprocess
           from pathlib import Path
 
-          path = Path("server/server.go")
-          lines = path.read_text().splitlines(keepends=True)
-          merged = []
-          i = 0
+          conflicts = subprocess.check_output(
+              ["git", "diff", "--name-only", "--diff-filter=U"], text=True
+          ).splitlines()
+          known_paths = {"server/server.go", "ui/src/vue/App.vue"}
+          if not conflicts or any(name not in known_paths for name in conflicts):
+              print("Unexpected rebase conflicts:")
+              print("\n".join(conflicts))
+              raise SystemExit("unexpected rebase conflict paths")
 
-          while i < len(lines):
-              if not lines[i].startswith("<<<<<<< "):
-                  merged.append(lines[i])
+          deploy_assignment = "s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun"
+          deploy_modal_declaration = "const deployModalOpen = ref(false);"
+
+          def is_finder_comment(line):
+              stripped = line.strip()
+              return (
+                  stripped.startswith("// Fuzzy file finder (")
+                  and stripped.endswith("+ the generic editor it opens.")
+              )
+
+          def resolve_file(path):
+              lines = path.read_text().splitlines(keepends=True)
+              merged = []
+              i = 0
+
+              while i < len(lines):
+                  if not lines[i].startswith("<<<<<<< "):
+                      merged.append(lines[i])
+                      i += 1
+                      continue
+
                   i += 1
-                  continue
+                  ours = []
+                  while i < len(lines) and not lines[i].startswith("=======\n"):
+                      ours.append(lines[i])
+                      i += 1
+                  if i == len(lines):
+                      raise SystemExit(f"unterminated rebase conflict in {path}")
 
-              i += 1
-              ours = []
-              while i < len(lines) and not lines[i].startswith("=======\n"):
-                  ours.append(lines[i])
                   i += 1
-              if i == len(lines):
-                  raise SystemExit("unterminated rebase conflict")
-
-              i += 1
-              theirs = []
-              while i < len(lines) and not lines[i].startswith(">>>>>>> "):
-                  theirs.append(lines[i])
+                  theirs = []
+                  while i < len(lines) and not lines[i].startswith(">>>>>>> "):
+                      theirs.append(lines[i])
+                      i += 1
+                  if i == len(lines):
+                      raise SystemExit(f"unterminated rebase conflict in {path}")
                   i += 1
-              if i == len(lines):
-                  raise SystemExit("unterminated rebase conflict")
-              i += 1
 
-              content = [line for line in ours + theirs if line.strip()]
-              if not content:
-                  raise SystemExit("empty rebase conflict")
+                  ours_content = [line for line in ours if line.strip()]
+                  theirs_content = [line for line in theirs if line.strip()]
+                  if not ours_content and not theirs_content:
+                      raise SystemExit(f"empty rebase conflict in {path}")
 
-              def safe(line):
-                  stripped = line.strip()
-                  return (
-                      (stripped.startswith('"') and stripped.endswith('"'))
-                      or stripped.startswith("s.integrationSkills = ")
-                      or stripped == "s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun"
-                  )
+                  if path == Path("ui/src/vue/App.vue"):
+                      if not (
+                          len(ours_content) == 1
+                          and is_finder_comment(ours_content[0])
+                          and len(theirs_content) == 2
+                          and deploy_modal_declaration in {line.strip() for line in theirs_content}
+                          and sum(is_finder_comment(line) for line in theirs_content) == 1
+                      ):
+                          raise SystemExit(
+                              "ui/src/vue/App.vue conflict is not the known deploy shortcut conflict"
+                          )
+                      content = [
+                          next(
+                              line
+                              for line in theirs_content
+                              if line.strip() == deploy_modal_declaration
+                          ),
+                          ours_content[0],
+                      ]
+                  else:
+                      content = ours_content + theirs_content
 
-              if not all(safe(line) for line in content):
-                  raise SystemExit("server/server.go conflict is not a known additive conflict")
+                      def safe(line):
+                          stripped = line.strip()
+                          return (
+                              (stripped.startswith('"') and stripped.endswith('"'))
+                              or stripped.startswith("s.integrationSkills = ")
+                              or stripped == deploy_assignment
+                          )
 
-              if all(line.strip().startswith('"') for line in content):
-                  content.sort(key=str.strip)
+                      if not all(safe(line) for line in content):
+                          raise SystemExit(
+                              "server/server.go conflict is not a known additive conflict"
+                          )
+                      if all(line.strip().startswith('"') for line in content):
+                          content.sort(key=str.strip)
 
-              for line in content:
-                  if line not in merged:
-                      merged.append(line)
+                  for line in content:
+                      if line not in merged:
+                          merged.append(line)
 
-          path.write_text("".join(merged))
+              path.write_text("".join(merged))
+
+          for name in conflicts:
+              resolve_file(Path(name))
           PY
             then
               :
             else
               return 1
             fi
-            if ! gofmt -w server/server.go; then
-              return 1
-            fi
-            if ! git add server/server.go; then
-              return 1
-            fi
+            while IFS= read -r conflict; do
+              if [ "$conflict" = "server/server.go" ] && ! gofmt -w server/server.go; then
+                return 1
+              fi
+              if ! git add -- "$conflict"; then
+                return 1
+              fi
+            done <<< "$conflicts"
           }
 
           if GIT_EDITOR=true git rebase upstream/main; then
-            exit 0
+            :
+          else
+            while true; do
+              if ! resolve_known_conflicts; then
+                git rebase --abort
+                exit 1
+              fi
+              if GIT_EDITOR=true git rebase --continue; then
+                break
+              fi
+            done
           fi
-
-          while true; do
-            if ! resolve_known_conflicts; then
-              git rebase --abort
-              exit 1
-            fi
-            if GIT_EDITOR=true git rebase --continue; then
-              break
-            fi
-          done
 
           if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- .; then
             echo "::error::Rebase left conflict markers in the tree"
