@@ -556,6 +556,12 @@ func TestBrowserIdleShutdownAndRestart(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	// Keep the short timeout for observing idle shutdown, but give the restarted
+	// browser a normal idle window while it performs a real navigation.
+	tools.mux.Lock()
+	tools.idleTimeout = DefaultIdleTimeout
+	tools.mux.Unlock()
+
 	browserCtx2, err := tools.GetBrowserContext()
 	if err != nil {
 		t.Fatalf("Failed to get browser context after idle: %v", err)
