@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Resolve only reviewed additive conflicts in the upstream sync rebase."""
+
+from pathlib import Path
+import subprocess
+import sys
+
+
+KNOWN_PATHS = {
+    "server/server.go",
+    "ui/src/vue/App.vue",
+    "ui/src/vue/components/CommandPalette.vue",
+}
+
+DEPLOY_ASSIGNMENT = (
+    "s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun"
+)
+APP_HANDLER_SUFFIX = [
+    "            commandPaletteOpen = false;\n",
+    "          }\n",
+    '        "\n',
+]
+APP_MODAL_SUFFIX = [
+    "            focusMessageInputIfUnfocused();\n",
+    "          }\n",
+    '        "\n',
+    "      />\n",
+]
+
+
+def marker_content(lines: list[str], start: int) -> tuple[list[str], list[str], int]:
+    ours: list[str] = []
+    theirs: list[str] = []
+    i = start + 1
+    while i < len(lines) and not lines[i].startswith("=======\n"):
+        ours.append(lines[i])
+        i += 1
+    if i == len(lines):
+        raise ValueError("unterminated rebase conflict")
+
+    i += 1
+    while i < len(lines) and not lines[i].startswith(">>>>>>> "):
+        theirs.append(lines[i])
+        i += 1
+    if i == len(lines):
+        raise ValueError("unterminated rebase conflict")
+    return ours, theirs, i + 1
+
+
+def normalized(lines: list[str]) -> list[str]:
+    return [line.strip() for line in lines if line.strip()]
+
+
+def resolve_app_hunk(
+    lines: list[str],
+    ours: list[str],
+    theirs: list[str],
+    after: int,
+) -> tuple[list[str], int]:
+    ours_text, theirs_text = normalized(ours), normalized(theirs)
+
+    handler_prefixes = {
+        (
+            '@open-favicon-emoji-picker="',
+            "() => {",
+            "faviconEmojiPickerOpen = true;",
+        ),
+        (
+            '@open-deploy-modal="',
+            "() => {",
+            "deployModalOpen = true;",
+        ),
+    }
+    if tuple(ours_text) in handler_prefixes and tuple(theirs_text) in handler_prefixes:
+        if lines[after : after + len(APP_HANDLER_SUFFIX)] != APP_HANDLER_SUFFIX:
+            raise ValueError("unknown App.vue command-palette handler conflict")
+        return ours + APP_HANDLER_SUFFIX + theirs + APP_HANDLER_SUFFIX, len(APP_HANDLER_SUFFIX)
+
+    modal_prefixes = {
+        (
+            "<FaviconEmojiPicker",
+            ':is-open="faviconEmojiPickerOpen"',
+            '@close="',
+            "() => {",
+            "faviconEmojiPickerOpen = false;",
+        ),
+        (
+            "<DeployModal",
+            ':is-open="deployModalOpen"',
+            ':suggested-dir="mostRecentCwd ?? undefined"',
+            '@close="',
+            "() => {",
+            "deployModalOpen = false;",
+        ),
+    }
+    if tuple(ours_text) in modal_prefixes and tuple(theirs_text) in modal_prefixes:
+        if lines[after : after + len(APP_MODAL_SUFFIX)] != APP_MODAL_SUFFIX:
+            raise ValueError("unknown App.vue modal conflict")
+        return ours + APP_MODAL_SUFFIX + theirs + APP_MODAL_SUFFIX, len(APP_MODAL_SUFFIX)
+
+    if len(ours_text) == len(theirs_text) == 1:
+        known_declarations = {
+            'import FaviconEmojiPicker from "./components/FaviconEmojiPicker.vue";',
+            'import DeployModal from "./components/DeployModal.vue";',
+            "const faviconEmojiPickerOpen = ref(false);",
+            "const deployModalOpen = ref(false);",
+        }
+        if ours_text[0] in known_declarations and theirs_text[0] in known_declarations:
+            return ours + theirs, 0
+
+    raise ValueError("unknown App.vue conflict hunk")
+
+
+def resolve_palette_hunk(
+    lines: list[str],
+    merged: list[str],
+    ours: list[str],
+    theirs: list[str],
+    after: int,
+) -> tuple[list[str], int]:
+    ours_text, theirs_text = normalized(ours), normalized(theirs)
+    emit_signatures = {
+        '(e: "open-favicon-emoji-picker"): void;',
+        '(e: "open-deploy-modal"): void;',
+    }
+    if len(ours_text) == len(theirs_text) == 1:
+        if ours_text[0] in emit_signatures and theirs_text[0] in emit_signatures:
+            return ours + theirs, 0
+
+    action_signatures = {
+        "favicon": (
+            'id: "favicon-emoji",',
+            'title: t("faviconEmoji"),',
+            'emit("open-favicon-emoji-picker");',
+        ),
+        "deploy": (
+            'id: "deploy-to-vm",',
+            'title: "Deploy to new exe.dev VM",',
+            'emit("open-deploy-modal");',
+        ),
+    }
+
+    def action_kind(content: list[str]) -> str | None:
+        text = "\n".join(normalized(content))
+        for kind, signature in action_signatures.items():
+            if all(part in text for part in signature):
+                return kind
+        return None
+
+    kinds = (action_kind(ours), action_kind(theirs))
+    if set(kinds) == {"favicon", "deploy"}:
+        if not merged or merged[-1] != "  items.push({\n":
+            raise ValueError("unknown CommandPalette.vue action conflict prefix")
+        if after >= len(lines) or lines[after] != "  });\n":
+            raise ValueError("unknown CommandPalette.vue action conflict suffix")
+        opener = merged.pop()
+        closer = lines[after]
+        replacement = [opener] + ours + [closer, "\n", opener] + theirs + [closer]
+        return replacement, 1
+
+    raise ValueError("unknown CommandPalette.vue conflict hunk")
+
+
+def resolve_server_hunk(ours: list[str], theirs: list[str]) -> list[str]:
+    content = [line for line in ours + theirs if line.strip()]
+    if not content:
+        raise ValueError("empty server/server.go conflict")
+
+    def safe(line: str) -> bool:
+        stripped = line.strip()
+        return (
+            (stripped.startswith('"') and stripped.endswith('"'))
+            or stripped.startswith("s.integrationSkills = ")
+            or stripped == DEPLOY_ASSIGNMENT
+        )
+
+    if not all(safe(line) for line in content):
+        raise ValueError("server/server.go conflict is not a known additive conflict")
+    if all(line.strip().startswith('"') for line in content):
+        content.sort(key=str.strip)
+    return content
+
+
+def resolve_text(name: str, text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    merged: list[str] = []
+    i = 0
+
+    while i < len(lines):
+        if not lines[i].startswith("<<<<<<< "):
+            merged.append(lines[i])
+            i += 1
+            continue
+
+        ours, theirs, after = marker_content(lines, i)
+        if not normalized(ours) and not normalized(theirs):
+            raise ValueError(f"empty conflict in {name}")
+
+        if name == "server/server.go":
+            replacement, consumed = resolve_server_hunk(ours, theirs), 0
+        elif name == "ui/src/vue/App.vue":
+            replacement, consumed = resolve_app_hunk(lines, ours, theirs, after)
+        elif name == "ui/src/vue/components/CommandPalette.vue":
+            replacement, consumed = resolve_palette_hunk(lines, merged, ours, theirs, after)
+        else:
+            raise ValueError(f"unsupported conflict path: {name}")
+
+        if name == "server/server.go":
+            for line in replacement:
+                if line not in merged:
+                    merged.append(line)
+        else:
+            merged.extend(replacement)
+        i = after + consumed
+
+    return "".join(merged)
+
+
+def main() -> None:
+    conflicts = subprocess.check_output(
+        ["git", "diff", "--name-only", "--diff-filter=U"], text=True
+    ).splitlines()
+    if not conflicts or any(name not in KNOWN_PATHS for name in conflicts):
+        print("Unexpected rebase conflicts:", *conflicts, sep="\n", file=sys.stderr)
+        raise SystemExit(1)
+
+    for name in conflicts:
+        path = Path(name)
+        try:
+            path.write_text(resolve_text(name, path.read_text()))
+        except ValueError as error:
+            raise SystemExit(f"{name}: {error}") from error
+        if name == "server/server.go":
+            subprocess.run(["gofmt", "-w", name], check=True)
+        subprocess.run(["git", "add", "--", name], check=True)
+
+
+if __name__ == "__main__":
+    main()
