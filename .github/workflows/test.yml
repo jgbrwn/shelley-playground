@@ -70,6 +70,14 @@ jobs:
       - name: Run Go tests
         run: go test -v ./...
 
+      # Unit tests run on Linux/amd64; compile the platform-sensitive tool
+      # package for the other release targets before Release runs.
+      - name: Compile release-target tool package
+        run: |
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -o /tmp/claudetool-linux-arm64.test ./claudetool
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go test -c -o /tmp/claudetool-darwin-amd64.test ./claudetool
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go test -c -o /tmp/claudetool-darwin-arm64.test ./claudetool
+
       - name: Build shelley binary
         run: go build -o bin/shelley ./cmd/shelley
 
