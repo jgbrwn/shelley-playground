@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,9 +86,15 @@ func TestBashBackgroundsLongCommand(t *testing.T) {
 		BackgroundAfter: 50 * time.Millisecond,
 	}).Tool()
 	g := newGate(t)
-	command := "echo started; " + g.wait() + "; echo finished; exit 3"
+	ready := newGate(t)
+	command := fmt.Sprintf(
+		"exec 3<>%q; echo started; printf ready > %q; read -r _ <&3; echo finished; exit 3",
+		string(g),
+		string(ready),
+	)
 	input, _ := json.Marshal(bashInput{Command: command})
 	ctx, cancel := context.WithCancel(WithToolUseID(t.Context(), "toolu_1"))
+	defer cancel()
 
 	out := tool.Run(ctx, input)
 	if out.Error != nil {
@@ -95,6 +102,24 @@ func TestBashBackgroundsLongCommand(t *testing.T) {
 	}
 	bg := <-jobs
 	job := bg.job
+	t.Cleanup(func() {
+		select {
+		case <-bg.exited:
+			return
+		default:
+		}
+		if err := job.Kill(); err != nil && !errors.Is(err, ErrBackgroundJobGone) {
+			t.Errorf("kill background job during cleanup: %v", err)
+		}
+		select {
+		case <-bg.exited:
+		case <-time.After(5 * time.Second):
+			if err := syscall.Kill(-job.PID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				t.Errorf("force-kill background job during cleanup: %v", err)
+			}
+			<-bg.exited
+		}
+	})
 	if job.ConversationID != "conv-1" || job.ToolUseID != "toolu_1" || job.Command != command {
 		t.Errorf("job = %+v, want conversation, tool use, and command recorded", job)
 	}
@@ -106,10 +131,41 @@ func TestBashBackgroundsLongCommand(t *testing.T) {
 		t.Errorf("display.Background = %+v, want job %+v", display.Background, job)
 	}
 	text := out.LLMContent[0].Text
-	for _, want := range []string{"started", job.ID, job.LogPath, "kill -- -" + strconv.Itoa(job.PID), "do not poll"} {
+	for _, want := range []string{job.ID, job.LogPath, "kill -- -" + strconv.Itoa(job.PID), "do not poll"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("result %q does not contain %q", text, want)
 		}
+	}
+
+	// Wait until the command has written its first line and opened the gate
+	// before cancelling the turn; process startup can exceed the background
+	// threshold on loaded CI runners.
+	readyResult := make(chan error, 1)
+	go func() {
+		f, err := os.Open(string(ready))
+		if err != nil {
+			readyResult <- err
+			return
+		}
+		defer f.Close()
+		output, err := io.ReadAll(f)
+		if err == nil && strings.TrimSpace(string(output)) != "ready" {
+			err = fmt.Errorf("readiness signal = %q, want ready", output)
+		}
+		readyResult <- err
+	}()
+	select {
+	case err := <-readyResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("backgrounded command did not reach the gate")
+	}
+	if output, err := os.ReadFile(job.LogPath); err != nil {
+		t.Fatal(err)
+	} else if !strings.Contains(string(output), "started\n") {
+		t.Fatalf("background job log %q does not contain its startup output", output)
 	}
 
 	// Cancelling the turn no longer affects a backgrounded job.
