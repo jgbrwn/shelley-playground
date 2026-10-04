@@ -25,11 +25,15 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
+          # The tag push below carries whatever workflow files the release
+          # commit contains, so it needs a token with the workflows
+          # permission; the default GITHUB_TOKEN cannot create such tags.
+          token: ${{ secrets.PLAYGROUND_SYNC_TOKEN }}
 
       - name: Generate version tag
         id: version
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PLAYGROUND_SYNC_TOKEN }}
         run: |
           # Get commit count as version number
           COUNT=$(git rev-list --count HEAD)
