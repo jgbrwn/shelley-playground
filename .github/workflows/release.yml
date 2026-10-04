@@ -47,6 +47,18 @@ jobs:
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
 
+          # Publish only the current tip of main. The tag name embeds the
+          # commit count, so a commit that a later push superseded gets a
+          # distinct tag name of its own; the checks below cannot recognize it
+          # as stale, and it would publish a release alongside the release for
+          # its replacement.
+          git fetch --quiet origin main:refs/remotes/origin/main
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse refs/remotes/origin/main)" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Commit $SHORT_SHA is no longer the tip of main; skipping release."
+            exit 0
+          fi
+
           # A scheduled sync and a push-triggered release can target the same
           # commit. Serialize releases and make retries idempotent.
           git fetch origin --tags --force
