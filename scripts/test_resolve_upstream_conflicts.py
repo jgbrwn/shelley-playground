@@ -138,6 +138,55 @@ func initServer(s *Server) {
         self.assertIn("s.integrationSkills = newIntegrationSkillCache", resolved)
         self.assertIn("s.deployManager = deploy.NewManager(nil)", resolved)
 
+    def test_app_preserves_mcp_and_deploy_props(self):
+        # Upstream's MCP-servers modal and our deploy modal both bind a prop to
+        # the chat interface at the same spot.
+        app = conflict_fixture('''<template>
+          :on-open-models-modal="() => (modelsModalOpen = true)"
+@@START@@ HEAD
+          :on-open-mcp-servers-modal="() => (mcpServersModalOpen = true)"
+@@SEPARATOR@@
+          :on-open-deploy-modal="() => (deployModalOpen = true)"
+@@END@@ deploy
+          :on-open-file-finder="openFileFinder"
+''')
+        resolved = resolve_text("ui/src/vue/App.vue", app)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertIn(":on-open-mcp-servers-modal=", resolved)
+        self.assertIn(":on-open-deploy-modal=", resolved)
+        self.assertIn(":on-open-file-finder=", resolved)
+
+    def test_chat_interface_preserves_mcp_and_deploy_props(self):
+        chat = conflict_fixture('''    onOpenModelsModal?: () => void;
+@@START@@ HEAD
+    onOpenMcpServersModal?: () => void;
+@@SEPARATOR@@
+    onOpenDeployModal?: () => void;
+@@END@@ deploy
+    onOpenFileFinder?: () => void;
+''')
+        resolved = resolve_text("ui/src/vue/components/ChatInterface.vue", chat)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertIn("onOpenMcpServersModal?: () => void;", resolved)
+        self.assertIn("onOpenDeployModal?: () => void;", resolved)
+        self.assertIn("onOpenFileFinder?: () => void;", resolved)
+
+    def test_go_sum_takes_the_union_of_dependency_lines(self):
+        # Upstream pulled in MCP/OAuth deps; our deploy SSH-key code pulled in
+        # edkey. Both sides only add lines, and go.sum must carry both.
+        gosum = conflict_fixture('''github.com/mattn/go-isatty v0.0.24 h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI=
+@@START@@ HEAD
+@@SEPARATOR@@
+github.com/mikesmitty/edkey v0.0.0-20170222072505-3356ea4e686a h1:eU8j/ClY2Ty3qdHnn0TyW3ivFoPC/0F1gQZz8yTxbbE=
+@@END@@ deploy
+github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOFAw7w=
+''')
+        resolved = resolve_text("go.sum", gosum)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertIn("mattn/go-isatty", resolved)
+        self.assertIn("mikesmitty/edkey", resolved)
+        self.assertIn("ncruces/go-strftime", resolved)
+
     def test_rejects_unknown_hunks_and_paths(self):
         with self.assertRaises(ValueError):
             resolve_text(

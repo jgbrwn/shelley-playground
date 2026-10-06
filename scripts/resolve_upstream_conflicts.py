@@ -7,8 +7,10 @@ import sys
 
 
 KNOWN_PATHS = {
+    "go.sum",
     "server/server.go",
     "ui/src/vue/App.vue",
+    "ui/src/vue/components/ChatInterface.vue",
     "ui/src/vue/components/CommandPalette.vue",
 }
 
@@ -49,6 +51,21 @@ def marker_content(lines: list[str], start: int) -> tuple[list[str], list[str], 
 
 def normalized(lines: list[str]) -> list[str]:
     return [line.strip() for line in lines if line.strip()]
+
+
+def resolve_go_sum_hunk(ours: list[str], theirs: list[str]) -> list[str]:
+    """go.sum conflicts are dependency-line additions from both sides.
+
+    Both sides only add lines, so the union keeps every module hash. main()
+    then runs `go mod tidy`, which is authoritative for ordering and for
+    direct-vs-indirect placement, so this union only has to be complete.
+    """
+    content = [line for line in ours + theirs if line.strip()]
+    if not content:
+        raise ValueError("empty go.sum conflict")
+    if any(" " not in line.strip() for line in content):
+        raise ValueError("go.sum conflict is not a set of dependency lines")
+    return sorted(set(content), key=lambda line: line.split(" ", 1)[0])
 
 
 def resolve_app_hunk(
@@ -102,13 +119,37 @@ def resolve_app_hunk(
         known_declarations = {
             'import FaviconEmojiPicker from "./components/FaviconEmojiPicker.vue";',
             'import DeployModal from "./components/DeployModal.vue";',
+            'import McpServersModal from "./components/McpServersModal.vue";',
             "const faviconEmojiPickerOpen = ref(false);",
             "const deployModalOpen = ref(false);",
+            "const mcpServersModalOpen = ref(mcpLoginResult.value !== null);",
         }
         if ours_text[0] in known_declarations and theirs_text[0] in known_declarations:
             return ours + theirs, 0
 
+        # Both sides bind an independent optional prop to the chat interface,
+        # e.g. upstream's MCP-servers modal alongside our deploy modal.
+        chat_props = {
+            ':on-open-mcp-servers-modal="() => (mcpServersModalOpen = true)"',
+            ':on-open-deploy-modal="() => (deployModalOpen = true)"',
+        }
+        if ours_text[0] in chat_props and theirs_text[0] in chat_props:
+            return ours + theirs, 0
+
     raise ValueError("unknown App.vue conflict hunk")
+
+
+def resolve_chat_interface_hunk(ours: list[str], theirs: list[str]) -> list[str]:
+    """Both sides declare an optional prop of the same shape."""
+    ours_text, theirs_text = normalized(ours), normalized(theirs)
+    prop_declarations = {
+        "onOpenMcpServersModal?: () => void;",
+        "onOpenDeployModal?: () => void;",
+    }
+    if len(ours_text) == len(theirs_text) == 1:
+        if ours_text[0] in prop_declarations and theirs_text[0] in prop_declarations:
+            return ours + theirs
+    raise ValueError("unknown ChatInterface.vue conflict hunk")
 
 
 def resolve_palette_hunk(
@@ -198,14 +239,18 @@ def resolve_text(name: str, text: str) -> str:
 
         if name == "server/server.go":
             replacement, consumed = resolve_server_hunk(ours, theirs), 0
+        elif name == "go.sum":
+            replacement, consumed = resolve_go_sum_hunk(ours, theirs), 0
         elif name == "ui/src/vue/App.vue":
             replacement, consumed = resolve_app_hunk(lines, ours, theirs, after)
+        elif name == "ui/src/vue/components/ChatInterface.vue":
+            replacement, consumed = resolve_chat_interface_hunk(ours, theirs), 0
         elif name == "ui/src/vue/components/CommandPalette.vue":
             replacement, consumed = resolve_palette_hunk(lines, merged, ours, theirs, after)
         else:
             raise ValueError(f"unsupported conflict path: {name}")
 
-        if name == "server/server.go":
+        if name in ("server/server.go", "go.sum"):
             for line in replacement:
                 if line not in merged:
                     merged.append(line)
@@ -233,6 +278,14 @@ def main() -> None:
         if name == "server/server.go":
             subprocess.run(["gofmt", "-w", name], check=True)
         subprocess.run(["git", "add", "--", name], check=True)
+
+    if "go.sum" in conflicts:
+        # GoReleaser runs `go mod tidy` as a before-hook and fails if it
+        # rewrites the tree, so a hand-merged dependency graph must be tidied
+        # here. tidy also sorts go.sum and moves direct dependencies out of
+        # the indirect block, which the union above does not do.
+        subprocess.run(["go", "mod", "tidy"], check=True)
+        subprocess.run(["git", "add", "--", "go.mod", "go.sum"], check=True)
 
 
 if __name__ == "__main__":
