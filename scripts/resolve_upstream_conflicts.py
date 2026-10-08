@@ -11,6 +11,7 @@ KNOWN_PATHS = {
     "server/server.go",
     "ui/src/vue/App.vue",
     "ui/src/vue/components/ChatInterface.vue",
+    "ui/src/vue/components/ChatOverflowMenu.vue",
     "ui/src/vue/components/CommandPalette.vue",
 }
 
@@ -140,7 +141,7 @@ def resolve_app_hunk(
 
 
 def resolve_chat_interface_hunk(ours: list[str], theirs: list[str]) -> list[str]:
-    """Both sides declare an optional prop of the same shape."""
+    """Preserve independent chat props and the upstream new-conversation slot."""
     ours_text, theirs_text = normalized(ours), normalized(theirs)
     prop_declarations = {
         "onOpenMcpServersModal?: () => void;",
@@ -149,7 +150,61 @@ def resolve_chat_interface_hunk(ours: list[str], theirs: list[str]) -> list[str]
     if len(ours_text) == len(theirs_text) == 1:
         if ours_text[0] in prop_declarations and theirs_text[0] in prop_declarations:
             return ours + theirs
+
+    new_conversation_slot = (
+        ours_text[0:4]
+        == [
+            ">",
+            "<button",
+            'class="btn-new"',
+            ':aria-label="t(\'newConversation\')"',
+        ]
+        and ours_text[-2:] == ["</button>", "</ChatOverflowMenu>"]
+        and '@click="onNewConversationClick"' in ours_text
+        and any(line.startswith("<svg") for line in ours_text)
+    )
+    if new_conversation_slot and theirs_text == [
+        '@open-deploy-modal="props.onOpenDeployModal?.()"',
+        "/>",
+    ]:
+        # Upstream moved the new-conversation button into ChatOverflowMenu's
+        # slot. Keep that slot and add our independent event binding to its
+        # opening tag; the deployment side's self-closing tag is obsolete.
+        return [theirs[0]] + ours
+
     raise ValueError("unknown ChatInterface.vue conflict hunk")
+
+
+def resolve_chat_overflow_menu_hunk(ours: list[str], theirs: list[str]) -> list[str]:
+    """Keep the deploy action, but not the stale menu block around it.
+
+    Upstream moved version checking below the preferences. The deploy commit
+    still carries the old check-version item and old preferences boundary in
+    this hunk, so only its divider and deploy button are safe to transplant.
+    """
+    expected = [
+        '<div class="overflow-menu-divider" />',
+        '<button class="overflow-menu-item" @click="onDeploy">',
+        '<i class="pi pi-upload chat-menu-icon" aria-hidden="true" />',
+        "Deploy to new exe.dev VM…",
+        "</button>",
+        '<div class="overflow-menu-divider" />',
+        '<button class="overflow-menu-item" @click="onCheckVersion">',
+        '<i class="pi pi-refresh chat-menu-icon" aria-hidden="true" />',
+        '{{ t("checkForNewVersion") }}',
+        '<span v-if="hasUpdate" class="version-menu-dot" />',
+        '<span class="overflow-menu-shortcut"',
+        '><kbd>{{ menuShortcutLabel("checkVersion") }}</kbd></span',
+        ">",
+        "</button>",
+        "<!-- Compact view/theme/notification controls -->",
+    ]
+    if not normalized(ours) and normalized(theirs) == expected:
+        # Keep the deploy action and its leading divider. The upstream side
+        # after the conflict already supplies the preferences divider, and
+        # its current check-version action appears later in the menu.
+        return theirs[:6]
+    raise ValueError("unknown ChatOverflowMenu.vue conflict hunk")
 
 
 def resolve_palette_hunk(
@@ -245,6 +300,8 @@ def resolve_text(name: str, text: str) -> str:
             replacement, consumed = resolve_app_hunk(lines, ours, theirs, after)
         elif name == "ui/src/vue/components/ChatInterface.vue":
             replacement, consumed = resolve_chat_interface_hunk(ours, theirs), 0
+        elif name == "ui/src/vue/components/ChatOverflowMenu.vue":
+            replacement, consumed = resolve_chat_overflow_menu_hunk(ours, theirs), 0
         elif name == "ui/src/vue/components/CommandPalette.vue":
             replacement, consumed = resolve_palette_hunk(lines, merged, ours, theirs, after)
         else:
