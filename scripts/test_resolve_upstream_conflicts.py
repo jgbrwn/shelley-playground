@@ -171,6 +171,73 @@ func initServer(s *Server) {
         self.assertIn("onOpenDeployModal?: () => void;", resolved)
         self.assertIn("onOpenFileFinder?: () => void;", resolved)
 
+    def test_chat_interface_keeps_upstream_slot_and_deploy_handler(self):
+        chat = conflict_fixture('''          @check-version="openVersionModal"
+@@START@@ HEAD
+        >
+          <button
+            class="btn-new"
+            :aria-label="t('newConversation')"
+            @click="onNewConversationClick"
+          >
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" class="chat-icon-1rem">
+              <path d="M12 4v16m8-8H4" />
+            </svg>
+          </button>
+        </ChatOverflowMenu>
+@@SEPARATOR@@
+          @open-deploy-modal="props.onOpenDeployModal?.()"
+        />
+@@END@@ deploy
+      </div>
+''')
+        resolved = resolve_text("ui/src/vue/components/ChatInterface.vue", chat)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertIn('@open-deploy-modal="props.onOpenDeployModal?.()"', resolved)
+        self.assertIn('class="btn-new"', resolved)
+        self.assertIn("@click=\"onNewConversationClick\"", resolved)
+        self.assertIn("</ChatOverflowMenu>", resolved)
+        self.assertNotIn("        />", resolved)
+
+    def test_chat_overflow_menu_keeps_deploy_without_stale_menu_items(self):
+        menu = conflict_fixture('''      <button class="overflow-menu-item" @click="onMcpServers">
+        {{ t("mcpServers") }}
+      </button>
+@@START@@ HEAD
+@@SEPARATOR@@
+
+      <div class="overflow-menu-divider" />
+      <button class="overflow-menu-item" @click="onDeploy">
+        <i class="pi pi-upload chat-menu-icon" aria-hidden="true" />
+        Deploy to new exe.dev VM…
+      </button>
+
+      <div class="overflow-menu-divider" />
+      <button class="overflow-menu-item" @click="onCheckVersion">
+        <i class="pi pi-refresh chat-menu-icon" aria-hidden="true" />
+        {{ t("checkForNewVersion") }}
+        <span v-if="hasUpdate" class="version-menu-dot" />
+        <span class="overflow-menu-shortcut"
+          ><kbd>{{ menuShortcutLabel("checkVersion") }}</kbd></span
+        >
+      </button>
+
+      <!-- Compact view/theme/notification controls -->
+@@END@@ deploy
+      <div class="overflow-menu-divider" />
+      <div class="overflow-quick-controls" />
+      <button class="overflow-menu-item" @click="onCheckVersion">
+        {{ t("checkForNewVersion") }}
+      </button>
+''')
+        resolved = resolve_text("ui/src/vue/components/ChatOverflowMenu.vue", menu)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertEqual(resolved.count("Deploy to new exe.dev VM…"), 1)
+        self.assertEqual(resolved.count("{{ t(\"checkForNewVersion\") }}"), 1)
+        self.assertEqual(resolved.count('@click="onCheckVersion"'), 1)
+        self.assertNotIn("Compact view/theme/notification controls", resolved)
+        self.assertEqual(resolved.count('<div class="overflow-menu-divider" />'), 2)
+
     def test_go_sum_takes_the_union_of_dependency_lines(self):
         # Upstream pulled in MCP/OAuth deps; our deploy SSH-key code pulled in
         # edkey. Both sides only add lines, and go.sum must carry both.
@@ -197,6 +264,16 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
             resolve_text(
                 "ui/src/vue/Unknown.vue",
                 "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n",
+            )
+        with self.assertRaises(ValueError):
+            resolve_text(
+                "ui/src/vue/components/ChatOverflowMenu.vue",
+                "<<<<<<< ours\nunknown\n=======\nunknown\n>>>>>>> theirs\n",
+            )
+        with self.assertRaises(ValueError):
+            resolve_text(
+                "ui/src/vue/components/ChatInterface.vue",
+                "<<<<<<< ours\n<UnknownSlot />\n=======\n<UnknownProp />\n>>>>>>> theirs\n",
             )
 
 
