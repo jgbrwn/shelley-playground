@@ -12,6 +12,29 @@ def conflict_fixture(text):
 
 
 class ConflictResolverTest(unittest.TestCase):
+    def test_readme_keeps_upstream_site_link_and_playground_intro(self):
+        readme = conflict_fixture('''# Shelley Playground — exe.dev-Deployer
+
+@@START@@ HEAD
+[shelley.dev](https://shelley.dev/)
+
+Shelley is a mobile-friendly, web-based, multi-conversation, multi-modal,
+multi-model, single-user coding agent built for but not exclusive to
+[exe.dev](https://exe.dev/). It does not come with authorization or sandboxing:
+bring your own.
+@@SEPARATOR@@
+**Shelley Playground** is a fork of [Shelley](https://github.com/boldsoftware/shelley) (by [Bold Software](https://github.com/boldsoftware)) that you can install on your MacBook or Linux system — or use to **replace Shelley on an existing exe.dev VM**.
+@@END@@ deploy
+> Upstream: **https://github.com/boldsoftware/shelley**
+''')
+        resolved = resolve_text("README.md", readme)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertIn("# Shelley Playground — exe.dev-Deployer", resolved)
+        self.assertIn("[shelley.dev](https://shelley.dev/)", resolved)
+        self.assertIn("**Shelley Playground** is a fork", resolved)
+        self.assertIn("> Upstream:", resolved)
+        self.assertNotIn("bring your own.", resolved)
+
     def test_app_preserves_favicon_and_deploy_features(self):
         app = conflict_fixture('''<template>
 @@START@@ HEAD
@@ -199,6 +222,42 @@ func initServer(s *Server) {
         self.assertIn("</ChatOverflowMenu>", resolved)
         self.assertNotIn("        />", resolved)
 
+    def test_chat_interface_preserves_new_conversation_and_deploy_handlers(self):
+        chat = conflict_fixture('''          @check-version="openVersionModal"
+@@START@@ HEAD
+          @new-conversation="onNewConversationClick"
+@@SEPARATOR@@
+          @open-deploy-modal="props.onOpenDeployModal?.()"
+@@END@@ deploy
+        >
+''')
+        resolved = resolve_text("ui/src/vue/components/ChatInterface.vue", chat)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertEqual(resolved.count('@new-conversation="onNewConversationClick"'), 1)
+        self.assertEqual(
+            resolved.count('@open-deploy-modal="props.onOpenDeployModal?.()"'), 1
+        )
+
+    def test_chat_interface_rejects_mixed_prop_and_event_conflicts(self):
+        with self.assertRaises(ValueError):
+            resolve_text(
+                "ui/src/vue/components/ChatInterface.vue",
+                "<<<<<<< ours\n"
+                '@new-conversation="onNewConversationClick"\n'
+                "=======\n"
+                "onOpenDeployModal?: () => void;\n"
+                ">>>>>>> theirs\n",
+            )
+        with self.assertRaises(ValueError):
+            resolve_text(
+                "ui/src/vue/components/ChatInterface.vue",
+                "<<<<<<< ours\n"
+                '@new-conversation="onNewConversationClick"\n'
+                "=======\n"
+                '@new-conversation="onNewConversationClick"\n'
+                ">>>>>>> theirs\n",
+            )
+
     def test_chat_overflow_menu_keeps_deploy_without_stale_menu_items(self):
         menu = conflict_fixture('''      <button class="overflow-menu-item" @click="onMcpServers">
         {{ t("mcpServers") }}
@@ -264,6 +323,11 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
             resolve_text(
                 "ui/src/vue/Unknown.vue",
                 "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n",
+            )
+        with self.assertRaises(ValueError):
+            resolve_text(
+                "README.md",
+                "<<<<<<< ours\nunknown\n=======\nunknown\n>>>>>>> theirs\n",
             )
         with self.assertRaises(ValueError):
             resolve_text(
