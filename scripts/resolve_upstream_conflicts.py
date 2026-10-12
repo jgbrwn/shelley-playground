@@ -7,6 +7,7 @@ import sys
 
 
 KNOWN_PATHS = {
+    "README.md",
     "go.sum",
     "server/server.go",
     "ui/src/vue/App.vue",
@@ -141,14 +142,27 @@ def resolve_app_hunk(
 
 
 def resolve_chat_interface_hunk(ours: list[str], theirs: list[str]) -> list[str]:
-    """Preserve independent chat props and the upstream new-conversation slot."""
+    """Preserve independent chat props, handlers, and the upstream slot."""
     ours_text, theirs_text = normalized(ours), normalized(theirs)
     prop_declarations = {
         "onOpenMcpServersModal?: () => void;",
         "onOpenDeployModal?: () => void;",
     }
     if len(ours_text) == len(theirs_text) == 1:
-        if ours_text[0] in prop_declarations and theirs_text[0] in prop_declarations:
+        if (
+            ours_text[0] != theirs_text[0]
+            and ours_text[0] in prop_declarations
+            and theirs_text[0] in prop_declarations
+        ):
+            return ours + theirs
+
+        # Upstream emits this event for its new-conversation menu item; our
+        # deployment feature adds a separate event binding at the same point.
+        event_bindings = {
+            '@new-conversation="onNewConversationClick"',
+            '@open-deploy-modal="props.onOpenDeployModal?.()"',
+        }
+        if {ours_text[0], theirs_text[0]} == event_bindings:
             return ours + theirs
 
     new_conversation_slot = (
@@ -173,6 +187,27 @@ def resolve_chat_interface_hunk(ours: list[str], theirs: list[str]) -> list[str]
         return [theirs[0]] + ours
 
     raise ValueError("unknown ChatInterface.vue conflict hunk")
+
+
+def resolve_readme_hunk(ours: list[str], theirs: list[str]) -> list[str]:
+    """Keep upstream's shelley.dev link with the fork-specific README intro."""
+    upstream_intro = [
+        "[shelley.dev](https://shelley.dev/)",
+        "Shelley is a mobile-friendly, web-based, multi-conversation, multi-modal,",
+        "multi-model, single-user coding agent built for but not exclusive to",
+        "[exe.dev](https://exe.dev/). It does not come with authorization or sandboxing:",
+        "bring your own.",
+    ]
+    playground_intro = [
+        "**Shelley Playground** is a fork of [Shelley](https://github.com/boldsoftware/shelley) (by [Bold Software](https://github.com/boldsoftware)) that you can install on your MacBook or Linux system — or use to **replace Shelley on an existing exe.dev VM**."
+    ]
+    if normalized(ours) == upstream_intro and normalized(theirs) == playground_intro:
+        # The Playground commit intentionally replaces the generic Shelley
+        # introduction. Preserve the upstream website link, but not the
+        # displaced boilerplate; the fork's intro and upstream attribution
+        # follow in the surrounding README.
+        return [ours[0], "\n"] + theirs
+    raise ValueError("unknown README.md introduction conflict")
 
 
 def resolve_chat_overflow_menu_hunk(ours: list[str], theirs: list[str]) -> list[str]:
@@ -294,6 +329,8 @@ def resolve_text(name: str, text: str) -> str:
 
         if name == "server/server.go":
             replacement, consumed = resolve_server_hunk(ours, theirs), 0
+        elif name == "README.md":
+            replacement, consumed = resolve_readme_hunk(ours, theirs), 0
         elif name == "go.sum":
             replacement, consumed = resolve_go_sum_hunk(ours, theirs), 0
         elif name == "ui/src/vue/App.vue":
