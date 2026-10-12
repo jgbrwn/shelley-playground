@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -66,6 +67,17 @@ func (c *compactTestConversation) turn(msg string) {
 		c.t.Fatalf("%q: got %d: %s", msg, w.Code, w.Body.String())
 	}
 	waitFor(c.t, 10*time.Second, func() bool { return c.endTurns() > before })
+	ctx, cancel := context.WithTimeout(c.t.Context(), 10*time.Second)
+	defer cancel()
+	manager, err := c.srv.getOrCreateConversationManager(ctx, c.id, "")
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	select {
+	case <-manager.idle():
+	case <-ctx.Done():
+		c.t.Fatalf("waiting for turn to finish: %v", ctx.Err())
+	}
 }
 
 // rows returns the conversation's rows decoded as LLM messages, by sequence id.
