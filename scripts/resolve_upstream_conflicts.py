@@ -190,24 +190,42 @@ def resolve_chat_interface_hunk(ours: list[str], theirs: list[str]) -> list[str]
 
 
 def resolve_readme_hunk(ours: list[str], theirs: list[str]) -> list[str]:
-    """Keep upstream's shelley.dev link with the fork-specific README intro."""
-    upstream_intro = [
-        "[shelley.dev](https://shelley.dev/)",
-        "Shelley is a mobile-friendly, web-based, multi-conversation, multi-modal,",
-        "multi-model, single-user coding agent built for but not exclusive to",
-        "[exe.dev](https://exe.dev/). It does not come with authorization or sandboxing:",
-        "bring your own.",
-    ]
-    playground_intro = [
-        "**Shelley Playground** is a fork of [Shelley](https://github.com/boldsoftware/shelley) (by [Bold Software](https://github.com/boldsoftware)) that you can install on your MacBook or Linux system — or use to **replace Shelley on an existing exe.dev VM**."
-    ]
-    if normalized(ours) == upstream_intro and normalized(theirs) == playground_intro:
-        # The Playground commit intentionally replaces the generic Shelley
-        # introduction. Preserve the upstream website link, but not the
-        # displaced boilerplate; the fork's intro and upstream attribution
-        # follow in the surrounding README.
+    """Keep upstream links that survive, with the fork's replacement content.
+
+    The Playground README deliberately replaces two upstream regions: the
+    generic Shelley introduction and the Architecture/History tail. Upstream
+    edits inside those regions re-conflict on every rebase; the fork's
+    replacement wins, keeping upstream's site link in the intro.
+    """
+    ours_text, theirs_text = normalized(ours), normalized(theirs)
+    if (
+        ours_text
+        and ours_text[0] == "[shelley.dev](https://shelley.dev/)"
+        and theirs_text
+        and theirs_text[0].startswith("**Shelley Playground** is a fork of")
+    ):
+        # Preserve the upstream website link, but not the displaced
+        # boilerplate; the fork's intro and upstream attribution follow in
+        # the surrounding README.
         return [ours[0], "\n"] + theirs
-    raise ValueError("unknown README.md introduction conflict")
+
+    if (
+        ours_text
+        and ours_text[0].startswith("The technical stack is Go for the backend")
+        and theirs_text[:3]
+        == [
+            "```bash",
+            "git clone https://github.com/jgbrwn/shelley-playground.git",
+            "cd shelley-playground",
+        ]
+        and any(line.startswith("make") for line in theirs_text[3:])
+    ):
+        # Upstream's Architecture/History tail was replaced by a pointer to
+        # ARCHITECTURE.md. The fork's build-from-source block closes with the
+        # shared fence after the conflict, so keep it verbatim.
+        return theirs
+
+    raise ValueError("unknown README.md conflict hunk")
 
 
 def resolve_chat_overflow_menu_hunk(ours: list[str], theirs: list[str]) -> list[str]:
