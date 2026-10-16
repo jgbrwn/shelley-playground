@@ -35,6 +35,48 @@ bring your own.
         self.assertIn("> Upstream:", resolved)
         self.assertNotIn("bring your own.", resolved)
 
+    def test_readme_keeps_fork_build_block_over_upstream_architecture_tail(self):
+        # Upstream extended its Architecture section (idle compaction); the
+        # fork replaced that whole tail with a pointer to ARCHITECTURE.md.
+        readme = conflict_fixture('''### Build from source (any machine)
+
+@@START@@ HEAD
+The technical stack is Go for the backend, SQLite for storage, and Typescript
+with Vue 3 + PrimeVue for the UI.
+
+A profile's `idle_compaction_minutes` makes its top-level conversations compact
+once idle that long after a turn.
+
+# History
+
+Shelley is partially based on our previous coding agent effort, [Sketch](https://github.com/boldsoftware/sketch).
+
+# Shelley's Name
+
+Shelley is so named because the main tool it uses is the shell, and I like
+putting "-ey" at the end of words.
+
+```
+socat TCP-LISTEN:9001,fork TCP:localhost:9000
+@@SEPARATOR@@
+```bash
+git clone https://github.com/jgbrwn/shelley-playground.git
+cd shelley-playground
+make        # or `make build-custom` for a stamped, deploy-capable binary
+@@END@@ deploy
+```
+
+See upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLite, Vue 3 + PrimeVue).
+''')
+        resolved = resolve_text("README.md", readme)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertIn("git clone https://github.com/jgbrwn/shelley-playground.git", resolved)
+        self.assertIn("make        # or `make build-custom`", resolved)
+        self.assertEqual(resolved.count("```"), 2)
+        self.assertNotIn("The technical stack is Go", resolved)
+        self.assertNotIn("socat TCP-LISTEN", resolved)
+        self.assertIn("[ARCHITECTURE.md](ARCHITECTURE.md)", resolved)
+
     def test_app_preserves_favicon_and_deploy_features(self):
         app = conflict_fixture('''<template>
 @@START@@ HEAD
@@ -328,6 +370,11 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
             resolve_text(
                 "README.md",
                 "<<<<<<< ours\nunknown\n=======\nunknown\n>>>>>>> theirs\n",
+            )
+        with self.assertRaises(ValueError):
+            resolve_text(
+                "README.md",
+                "<<<<<<< ours\nSomething upstream entirely new\n=======\nunknown\n>>>>>>> theirs\n",
             )
         with self.assertRaises(ValueError):
             resolve_text(
