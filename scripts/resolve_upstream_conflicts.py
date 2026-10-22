@@ -225,6 +225,20 @@ def resolve_readme_hunk(ours: list[str], theirs: list[str]) -> list[str]:
         # shared fence after the conflict, so keep it verbatim.
         return theirs
 
+    if (
+        not ours_text
+        and theirs_text[:1]
+        == [
+            "See upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLite, Vue 3 + PrimeVue)."
+        ]
+        and any("customizing-shelley" in line for line in theirs_text)
+    ):
+        # Upstream edited the tail that the fork deletes, so git can only
+        # express the replacement as "upstream ends here, the fork's tail
+        # begins". The fork's tail wins verbatim: it already opens with the
+        # blank line that follows the shared build-block fence.
+        return theirs
+
     raise ValueError("unknown README.md conflict hunk")
 
 
