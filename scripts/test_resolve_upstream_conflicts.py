@@ -105,6 +105,47 @@ See upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLit
         self.assertIn("```\n\nSee upstream [ARCHITECTURE.md]", resolved)
         self.assertNotIn("```\n\n\n", resolved)
 
+    def test_release_workflow_drops_upstream_headless_shell_steps(self):
+        # Upstream keeps editing its headless-shell release steps; the fork
+        # removes them and leaves a note explaining why.
+        workflow = conflict_fixture('''      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+@@START@@ HEAD
+      - name: Resolve headless-shell stable version
+        id: headless
+        run: |
+          VERSION=$(python3 scripts/extract-headless-shell.py --resolve-version)
+@@SEPARATOR@@
+# The headless-shell (Chromium) release step is intentionally omitted from
+# the playground fork. Upstream Shelley publishes headless-shell as a separate
+# GitHub release on boldsoftware/shelley; the playground fork downloads it
+# from there at build time.
+@@END@@ deploy
+''')
+        resolved = resolve_text(".github/workflows/release.yml", workflow)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertNotIn("extract-headless-shell.py --resolve-version", resolved)
+        self.assertIn("intentionally omitted from", resolved)
+        self.assertIn("- name: Run GoReleaser", resolved)
+
+    def test_chat_interface_drops_stale_new_conversation_binding(self):
+        # ChatOverflowMenu stopped emitting new-conversation, so the deploy
+        # commit's binding for it must not survive the resolution.
+        chat = conflict_fixture('''          @check-version="openVersionModal"
+@@START@@ HEAD
+@@SEPARATOR@@
+          @new-conversation="onNewConversationClick"
+          @open-deploy-modal="props.onOpenDeployModal?.()"
+@@END@@ deploy
+        >
+''')
+        resolved = resolve_text("ui/src/vue/components/ChatInterface.vue", chat)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertEqual(
+            resolved.count('@open-deploy-modal="props.onOpenDeployModal?.()"'), 1
+        )
+        self.assertNotIn("@new-conversation=", resolved)
+
     def test_app_preserves_favicon_and_deploy_features(self):
         app = conflict_fixture('''<template>
 @@START@@ HEAD
