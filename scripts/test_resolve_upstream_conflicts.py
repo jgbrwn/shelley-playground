@@ -77,6 +77,34 @@ See upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLit
         self.assertNotIn("socat TCP-LISTEN", resolved)
         self.assertIn("[ARCHITECTURE.md](ARCHITECTURE.md)", resolved)
 
+    def test_readme_keeps_fork_tail_when_upstream_edited_the_deleted_tail(self):
+        # Upstream reworded the compaction paragraph it deletes, so git can
+        # only express the replacement as an empty upstream side followed by
+        # the fork's whole tail.
+        readme = conflict_fixture('''make        # or `make build-custom` for a stamped, deploy-capable binary
+```
+@@START@@ HEAD
+@@SEPARATOR@@
+
+See upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLite, Vue 3 + PrimeVue).
+
+---
+
+## Keeping it fresh: rebasing against upstream Shelley
+
+- Shelley skill for customizing your own Shelley: search for `customizing-shelley` in the repo's `AGENTS.md`
+@@END@@ deploy
+''')
+        resolved = resolve_text("README.md", readme)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertIn("make        # or `make build-custom`", resolved)
+        self.assertIn("[ARCHITECTURE.md](ARCHITECTURE.md)", resolved)
+        self.assertIn("## Keeping it fresh", resolved)
+        # The blank line separating the fence from the fork's tail is not
+        # doubled by the resolution.
+        self.assertIn("```\n\nSee upstream [ARCHITECTURE.md]", resolved)
+        self.assertNotIn("```\n\n\n", resolved)
+
     def test_app_preserves_favicon_and_deploy_features(self):
         app = conflict_fixture('''<template>
 @@START@@ HEAD
@@ -375,6 +403,13 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
             resolve_text(
                 "README.md",
                 "<<<<<<< ours\nSomething upstream entirely new\n=======\nunknown\n>>>>>>> theirs\n",
+            )
+        # An empty-ours hunk is only accepted when the fork's own tail anchors
+        # it; anything else must still fail closed.
+        with self.assertRaises(ValueError):
+            resolve_text(
+                "README.md",
+                "<<<<<<< ours\n=======\nSee upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLite, Vue 3 + PrimeVue).\n>>>>>>> theirs\n",
             )
         with self.assertRaises(ValueError):
             resolve_text(
