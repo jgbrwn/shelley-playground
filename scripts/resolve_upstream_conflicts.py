@@ -6,6 +6,12 @@ import subprocess
 import sys
 
 
+# Files this fork deletes on purpose. Upstream keeps editing them, so every
+# sync reports a modify/delete conflict; the deletion is the resolution.
+DELETED_PATHS = {
+    ".github/workflows/publish-version-metadata.yml",
+}
+
 KNOWN_PATHS = {
     "README.md",
     "go.sum",
@@ -14,6 +20,7 @@ KNOWN_PATHS = {
     "ui/src/vue/components/ChatInterface.vue",
     "ui/src/vue/components/ChatOverflowMenu.vue",
     "ui/src/vue/components/CommandPalette.vue",
+    ".github/workflows/release.yml",
 }
 
 DEPLOY_ASSIGNMENT = (
@@ -186,6 +193,22 @@ def resolve_chat_interface_hunk(ours: list[str], theirs: list[str]) -> list[str]
         # opening tag; the deployment side's self-closing tag is obsolete.
         return [theirs[0]] + ours
 
+    if (
+        not ours_text
+        and theirs_text.count('@open-deploy-modal="props.onOpenDeployModal?.()"') == 1
+        and set(theirs_text)
+        <= {
+            '@new-conversation="onNewConversationClick"',
+            '@open-deploy-modal="props.onOpenDeployModal?.()"',
+        }
+        and len(set(theirs_text)) == len(theirs_text)
+    ):
+        # ChatOverflowMenu no longer emits new-conversation (upstream moved
+        # that button into the component itself), so only our deploy binding
+        # survives. Dropping the stale one keeps the template honest: an
+        # event that no longer exists must not stay bound.
+        return [line for line in theirs if line.strip().startswith("@open-deploy-modal=")]
+
     raise ValueError("unknown ChatInterface.vue conflict hunk")
 
 
@@ -240,6 +263,25 @@ def resolve_readme_hunk(ours: list[str], theirs: list[str]) -> list[str]:
         return theirs
 
     raise ValueError("unknown README.md conflict hunk")
+
+
+def resolve_release_workflow_hunk(ours: list[str], theirs: list[str]) -> list[str]:
+    """Drop upstream's headless-shell release steps, keeping the fork's note.
+
+    Upstream publishes Chromium headless-shell as its own release; the fork
+    downloads it from upstream at build time instead. Each upstream edit in
+    that region re-conflicts, and the fork's replacement is the stated policy:
+    the note that explains why the steps are absent.
+    """
+    theirs_text = normalized(theirs)
+    if (
+        any("id: headless" in line for line in normalized(ours))
+        and theirs_text
+        and theirs_text[0].startswith("# The headless-shell (Chromium) release step")
+        and any("does not" in line or "is intentionally omitted" in line for line in theirs_text)
+    ):
+        return theirs
+    raise ValueError("unknown release.yml conflict hunk")
 
 
 def resolve_chat_overflow_menu_hunk(ours: list[str], theirs: list[str]) -> list[str]:
@@ -369,6 +411,8 @@ def resolve_text(name: str, text: str) -> str:
             replacement, consumed = resolve_app_hunk(lines, ours, theirs, after)
         elif name == "ui/src/vue/components/ChatInterface.vue":
             replacement, consumed = resolve_chat_interface_hunk(ours, theirs), 0
+        elif name == ".github/workflows/release.yml":
+            replacement, consumed = resolve_release_workflow_hunk(ours, theirs), 0
         elif name == "ui/src/vue/components/ChatOverflowMenu.vue":
             replacement, consumed = resolve_chat_overflow_menu_hunk(ours, theirs), 0
         elif name == "ui/src/vue/components/CommandPalette.vue":
@@ -391,12 +435,19 @@ def main() -> None:
     conflicts = subprocess.check_output(
         ["git", "diff", "--name-only", "--diff-filter=U"], text=True
     ).splitlines()
-    if not conflicts or any(name not in KNOWN_PATHS for name in conflicts):
+    if not conflicts or any(
+        name not in KNOWN_PATHS and name not in DELETED_PATHS for name in conflicts
+    ):
         print("Unexpected rebase conflicts:", *conflicts, sep="\n", file=sys.stderr)
         raise SystemExit(1)
 
     for name in conflicts:
         path = Path(name)
+        if name in DELETED_PATHS:
+            if path.exists():
+                path.unlink()
+            subprocess.run(["git", "rm", "--quiet", "--", name], check=True)
+            continue
         try:
             path.write_text(resolve_text(name, path.read_text()))
         except ValueError as error:
