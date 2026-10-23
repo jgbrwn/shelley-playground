@@ -53,6 +53,14 @@ upstream's exact prose rot silently: upstream reworded a paragraph it deletes,
 which turned a twelve-line conflict into a sixty-four-line one with an empty
 "ours" side, and the old rule stopped matching.
 
+The same region produces a different hunk depending on where upstream's edit
+lands. The fork deletes upstream's whole Architecture/History tail, so an
+upstream edit inside it can surface either as "upstream ends here, the fork's
+tail begins" (empty "ours") or as "upstream's whole tail" against a single
+fork heading. Rather than enumerate every alignment, the rule checks whether
+"ours" contains any marker of that deleted tail and "theirs" contains none.
+Prefer recognising the *region* over recognising the exact lines.
+
 ### Rules that must keep aborting
 
 Do not widen these away. A conflict where both sides change the same thing for
