@@ -167,6 +167,42 @@ See upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLit
             resolved.index("s.deployManager"),
         )
 
+    def test_readme_keeps_fork_heading_when_upstream_edits_inside_deleted_tail(
+        self,
+    ):
+        # Upstream edited a line inside the Architecture/History tail the fork
+        # deletes, so git aligned the hunk with upstream's whole tail as "ours"
+        # against a single fork heading.
+        readme = conflict_fixture("""README BEFORE
+@@START@@ HEAD
+# Architecture
+
+The technical stack is Go for the backend, SQLite for storage, and Typescript
+with Vue 3 + PrimeVue for the UI.
+
+# History
+
+Shelley is based on Sketch.
+
+# Building Shelley
+
+Run `make`. Run `make serve` to start Shelley locally, or `make serve-dev`.
+@@SEPARATOR@@
+### Build from source (any machine)
+@@END@@ deploy
+
+```bash
+git clone https://github.com/jgbrwn/shelley-playground.git
+```
+""")
+        resolved = resolve_text("README.md", readme)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertIn("### Build from source (any machine)", resolved)
+        self.assertIn("git clone https://github.com/jgbrwn/shelley-playground.git", resolved)
+        self.assertNotIn("The technical stack is Go", resolved)
+        self.assertNotIn("# Architecture", resolved)
+        self.assertNotIn("make serve-dev", resolved)
+
     def test_app_preserves_favicon_and_deploy_features(self):
         app = conflict_fixture('''<template>
 @@START@@ HEAD

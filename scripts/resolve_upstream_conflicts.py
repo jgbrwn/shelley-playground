@@ -263,6 +263,29 @@ def resolve_readme_hunk(ours: list[str], theirs: list[str]) -> list[str]:
         # blank line that follows the shared build-block fence.
         return theirs
 
+    # Upstream edited somewhere inside the Architecture/History tail that the
+    # fork deletes wholesale. Depending on where the edit lands, git aligns the
+    # hunk differently -- sometimes the upstream tail is "ours" against a small
+    # fragment of the fork's replacement. The fork's text wins either way;
+    # upstream's tail is exactly the prose being removed.
+    upstream_tail_markers = (
+        "# Architecture",
+        "# History",
+        "# Shelley's Name",
+        "# Open source",
+        "# Building Shelley",
+        "The technical stack is Go for the backend",
+    )
+    ours_is_upstream_tail = any(
+        line.startswith(marker) or marker in line
+        for line in ours_text
+        for marker in upstream_tail_markers
+    )
+    if ours_is_upstream_tail and theirs_text and not any(
+        marker in line for line in theirs_text for marker in upstream_tail_markers
+    ):
+        return theirs
+
     raise ValueError("unknown README.md conflict hunk")
 
 
