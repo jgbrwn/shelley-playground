@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Resolve only reviewed additive conflicts in the upstream sync rebase."""
 
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -366,24 +367,76 @@ def resolve_palette_hunk(
     raise ValueError("unknown CommandPalette.vue conflict hunk")
 
 
+ASSIGNMENT_RE = re.compile(r"^s\.(?P<field>[A-Za-z0-9_]+) = \S.*$")
+
+
+def is_import(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith('"') and stripped.endswith('"')
+
+
+def assignment_fields(lines: list[str]) -> dict[str, list[str]]:
+    """Map each struct field to the assignment lines one side makes to it."""
+    fields: dict[str, list[str]] = {}
+    for line in lines:
+        match = ASSIGNMENT_RE.match(line.strip())
+        if match:
+            fields.setdefault(match.group("field"), []).append(line.strip())
+    return fields
+
+
 def resolve_server_hunk(ours: list[str], theirs: list[str]) -> list[str]:
+    """Keep independent additive lines in NewServer.
+
+    Upstream and the deploy feature both add lines to the same place in
+    NewServer: imports of new packages, and single-line assignments to
+    struct fields. Distinct fields are independent, so keeping both is the
+    resolution.
+
+    When both sides assign the same field, the deploy commit is carrying a
+    stale copy of a line upstream owns and has since changed, so upstream's
+    line is the truth. The exception is the fork's own deploy assignment: a
+    duplicate there would mean upstream and the fork disagree about the same
+    field, which is a real conflict.
+    """
     content = [line for line in ours + theirs if line.strip()]
     if not content:
         raise ValueError("empty server/server.go conflict")
 
-    def safe(line: str) -> bool:
-        stripped = line.strip()
-        return (
-            (stripped.startswith('"') and stripped.endswith('"'))
-            or stripped.startswith("s.integrationSkills = ")
-            or stripped == DEPLOY_ASSIGNMENT
-        )
+    imports = [line for line in content if is_import(line)]
+    upstream = assignment_fields(ours)
+    deploy = assignment_fields(theirs)
 
-    if not all(safe(line) for line in content):
-        raise ValueError("server/server.go conflict is not a known additive conflict")
-    if all(line.strip().startswith('"') for line in content):
-        content.sort(key=str.strip)
-    return content
+    kept: list[str] = []
+    seen: set[str] = set()
+    for line in content:
+        if is_import(line):
+            continue
+        match = ASSIGNMENT_RE.match(line.strip())
+        if not match:
+            raise ValueError(
+                "server/server.go conflict is not an additive import or "
+                f"single-line assignment: {line.strip()!r}"
+            )
+        field = match.group("field")
+        if field in seen:
+            continue
+        seen.add(field)
+        both = upstream.get(field), deploy.get(field)
+        if both[0] and both[1] and set(both[0]) != set(both[1]):
+            if DEPLOY_ASSIGNMENT in both[0] + both[1]:
+                raise ValueError(
+                    f"server/server.go disagrees about s.{field}, "
+                    "which the deploy feature owns"
+                )
+            # The deploy commit echoes a line upstream owns and has since
+            # changed, so upstream's line is the truth.
+            kept.append(both[0][0] + "\n")
+            continue
+        kept.append(line)
+
+    imports.sort(key=str.strip)
+    return imports + kept
 
 
 def resolve_text(name: str, text: str) -> str:
