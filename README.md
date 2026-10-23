@@ -184,13 +184,15 @@ This fork's GitHub Actions keep releases fresh without manual intervention:
   1. Fetches `boldsoftware/shelley` `main` as `upstream`.
   2. Checks whether `upstream/main` has moved beyond the playground's merge-base.
   3. Attempts `git rebase` of the playground commits onto `upstream/main`.
-  4. Automatically resolves the known additive `server/server.go` integration conflict; unsupported conflicts fail loudly without force-pushing.
+  4. Resolves known conflict shapes through `scripts/resolve_upstream_conflicts.py` — additive `server/server.go` lines, the two README regions this fork replaces, the chat-toolbar/menu wiring, `go.sum`, and the fork's deliberate release-workflow differences. It is fail-closed: an unrecognised shape logs the combined diff and aborts without force-pushing. See [`docs/maintaining-the-fork.md`](docs/maintaining-the-fork.md) for how to teach it a new shape.
   5. On success, pushes the rebased `main`; that push runs `Test`, whose successful result triggers `release.yml` for the tested commit.
   6. If upstream hasn't moved, generates a new `v0.N.9OCTAL` tag (same scheme as upstream) for the current HEAD and, when needed, builds UI + templates and runs **GoReleaser** to publish cross-compiled binaries (linux/darwin, amd64/arm64) directly to this repo's Releases page.
 
 - **`.github/workflows/release.yml`** (mirrored from upstream, trimmed) triggers on successful `Test` runs and is the secondary release path for manual pushes and rebased nightly pushes. Releases are serialized and retries skip an already-published tag. `.goreleaser.yml` is retargeted to **`jgbrwn/shelley-playground`**. The playground drops three upstream steps that don't apply to a fork: the Homebrew cask (upstream's `boldsoftware/tap` remains canonical), the headless-shell Chromium release (downloaded from upstream at build time), and the GitHub Pages version-metadata publisher.
 
 In short: if upstream ships, this fork ships the next morning, fully rebased and released. And if you push to `main` manually, the test→release chain publishes too.
+
+> **Maintaining the fork:** when a sync fails, or before changing anything that lives near upstream code, read [`docs/maintaining-the-fork.md`](docs/maintaining-the-fork.md). It records where fork documentation belongs, how to teach the resolver a new conflict shape, which conflicts must keep aborting, the `make build-custom`-before-`go test` ordering, and how to verify a rebase before pushing.
 
 ---
 
