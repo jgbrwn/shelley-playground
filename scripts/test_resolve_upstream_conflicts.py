@@ -146,6 +146,27 @@ See upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLit
         )
         self.assertNotIn("@new-conversation=", resolved)
 
+    def test_server_keeps_new_upstream_assignment_alongside_deploy(self):
+        # Today's real hunk: upstream added a new field assignment at the
+        # deploy feature's insertion point.
+        server = conflict_fixture('''func NewServer(s *Server) {
+    s.integrationSkills = newIntegrationSkillCache(logger, currentIntegrationSkillDiscoverer(logger))
+@@START@@ HEAD
+    s.listIntegrations = listCurrentIntegrations
+@@SEPARATOR@@
+    s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun
+@@END@@ deploy
+''')
+        resolved = resolve_text("server/server.go", server)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertIn("s.listIntegrations = listCurrentIntegrations", resolved)
+        self.assertIn("s.deployManager = deploy.NewManager(nil)", resolved)
+        # Upstream's line is preserved ahead of the fork's, as in the file.
+        self.assertLess(
+            resolved.index("s.listIntegrations"),
+            resolved.index("s.deployManager"),
+        )
+
     def test_app_preserves_favicon_and_deploy_features(self):
         app = conflict_fixture('''<template>
 @@START@@ HEAD
@@ -251,18 +272,18 @@ const deployModalOpen = ref(false);
         server = conflict_fixture('''package server
 import (
 @@START@@ HEAD
-    "server/deploy"
-@@SEPARATOR@@
     "skills"
-@@END@@ upstream
+@@SEPARATOR@@
+    "server/deploy"
+@@END@@ deploy
 )
 func initServer(s *Server) {
 @@START@@ HEAD
+    s.integrationSkills = newIntegrationSkillCache(logger, currentIntegrationSkillDiscoverer(logger))
+@@SEPARATOR@@
     s.integrationSkills = discoverIntegrationSkillsAtStartup(logger)
     s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun
-@@SEPARATOR@@
-    s.integrationSkills = newIntegrationSkillCache(logger, currentIntegrationSkillDiscoverer(logger))
-@@END@@ upstream
+@@END@@ deploy
 }
 ''')
         resolved = resolve_text("server/server.go", server)
@@ -451,6 +472,24 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
             resolve_text(
                 "README.md",
                 "<<<<<<< ours\n=======\nSee upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLite, Vue 3 + PrimeVue).\n>>>>>>> theirs\n",
+            )
+        with self.assertRaises(ValueError):
+            resolve_text(
+                "server/server.go",
+                "<<<<<<< ours\n"
+                "    s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun\n"
+                "=======\n"
+                "    s.deployManager = somethingElse()\n"
+                ">>>>>>> theirs\n",
+            )
+        with self.assertRaises(ValueError):
+            resolve_text(
+                "server/server.go",
+                "<<<<<<< ours\n"
+                "    notAnAssignment()\n"
+                "=======\n"
+                "    s.deployManager = deploy.NewManager(nil)\n"
+                ">>>>>>> theirs\n",
             )
         with self.assertRaises(ValueError):
             resolve_text(
