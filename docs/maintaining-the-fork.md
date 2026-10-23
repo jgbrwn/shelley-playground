@@ -154,6 +154,53 @@ cd ui && pnpm run type-check && pnpm run type-check:vue && pnpm run lint && pnpm
 Playwright E2E steps in `.github/workflows/test.yml` are disabled (`if: false`),
 so a green CI run does not mean the browser tests ran.
 
+## A red `Test` run is not automatically your fault
+
+`go test -v ./...` compiles and runs every package concurrently, so the machine
+is far more loaded than it is for a local `go test ./server`. Some upstream
+tests assert on goroutine *states*, which is load-sensitive.
+
+The worked example: `TestDirectPTYCloseInterruptsRecv` in
+`server/terminal_disk_full_test.go`. Both subtests (`holding_the_terminal`
+waiting for `IO wait`/`syscall`, `detached` waiting for `select`/`chan receive`)
+call `waitForParkedGoroutine`, which polls `runtime.Stack(buf, true)` with a
+fixed 1 MiB buffer for a specific goroutine. Under CI load an all-goroutines
+dump measured **1,380,464 bytes**, so `runtime.Stack` truncates and the
+goroutine being waited on can be absent from the dump, producing the full 5s
+timeout. When it passes, the subtest finishes in about 0.2s.
+
+**This is upstream's bug, not the fork's.** Verified on 2026-10-23: upstream's
+own CI failed `TestDirectPTYCloseInterruptsRecv/holding_the_terminal` on
+`b138f633`, while the fork (based on the same commit) failed the `detached`
+subtest. Which subtest loses is a coin flip; that both reproduce on the same
+upstream commit is the point. Earlier fork commits passed it, and the commits
+pushed between them changed only `README.md`, `docs/`, and `scripts/`.
+
+Before assuming a red run means a regression:
+
+1. Check whether the failing test is upstream-owned
+   (`git cat-file -e origin/main:<path>`) and whether your commits touched it —
+   `git diff --name-only <last-green>..<head>`.
+2. Check whether upstream is red on the same commit:
+   `gh run list --repo boldsoftware/shelley --workflow test.yml`.
+3. Reproduce locally, then under load (`go test ./server -count=3`). A test that
+   only fails on the runner is usually not a real regression.
+4. `gh run rerun <id> --failed`, then confirm.
+
+This matters more than a normal flake because `release.yml` gates on
+`workflow_run.conclusion == 'success'`: a flaky upstream test blocks the fork's
+release until somebody reruns the job. Note that GitHub's "re-run failed jobs"
+may land on an equally loaded runner and fail identically — that is not evidence
+of a regression either. `CI-Job-Retries` appears in some upstream commit
+messages but nothing in either repository reads it; an intermittent red run
+needs a human.
+
+Record findings like this here rather than by editing the upstream test. Bumping
+that buffer would fix the real cause, but it is upstream's file, and every
+upstream file the fork edits becomes a nightly rebase obligation. If it keeps
+blocking releases, the lever the fork has is its own workflow: retry the
+`Run Go tests` step, or tolerate this known-upstream failure explicitly.
+
 ## Cutting a release
 
 A push to `main` triggers `Test`, whose success triggers `release.yml`. A manual
