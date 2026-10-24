@@ -73,9 +73,17 @@ def resolve_go_sum_hunk(ours: list[str], theirs: list[str]) -> list[str]:
     content = [line for line in ours + theirs if line.strip()]
     if not content:
         raise ValueError("empty go.sum conflict")
-    if any(" " not in line.strip() for line in content):
-        raise ValueError("go.sum conflict is not a set of dependency lines")
-    return sorted(set(content), key=lambda line: line.split(" ", 1)[0])
+    hashes: dict[tuple[str, str], str] = {}
+    for line in content:
+        parts = line.split()
+        if len(parts) != 3 or not re.fullmatch(r"h1:[A-Za-z0-9+/]{43}=", parts[2]):
+            raise ValueError("go.sum conflict is not a set of dependency hashes")
+        module, version, digest = parts
+        key = module, version
+        if key in hashes and hashes[key] != digest:
+            raise ValueError(f"conflicting go.sum hashes for {module} {version}")
+        hashes[key] = digest
+    return sorted(set(content))
 
 
 def resolve_app_hunk(
@@ -268,21 +276,23 @@ def resolve_readme_hunk(ours: list[str], theirs: list[str]) -> list[str]:
     # hunk differently -- sometimes the upstream tail is "ours" against a small
     # fragment of the fork's replacement. The fork's text wins either way;
     # upstream's tail is exactly the prose being removed.
-    upstream_tail_markers = (
+    upstream_tail_headings = {
         "# Architecture",
         "# History",
         "# Shelley's Name",
         "# Open source",
         "# Building Shelley",
-        "The technical stack is Go for the backend",
-    )
-    ours_is_upstream_tail = any(
-        line.startswith(marker) or marker in line
-        for line in ours_text
-        for marker in upstream_tail_markers
-    )
-    if ours_is_upstream_tail and theirs_text and not any(
-        marker in line for line in theirs_text for marker in upstream_tail_markers
+    }
+    if (
+        ours_text[:1] == ["# Architecture"]
+        and len(ours_text) > 1
+        and ours_text[1].startswith("The technical stack is Go for the backend")
+        and all(
+            line in upstream_tail_headings
+            for line in ours_text
+            if line.startswith("#")
+        )
+        and theirs_text == ["### Build from source (any machine)"]
     ):
         return theirs
 
@@ -297,11 +307,36 @@ def resolve_release_workflow_hunk(ours: list[str], theirs: list[str]) -> list[st
     that region re-conflicts, and the fork's replacement is the stated policy:
     the note that explains why the steps are absent.
     """
-    theirs_text = normalized(theirs)
+    ours_text, theirs_text = normalized(ours), normalized(theirs)
+    # Preserve a reviewed upstream action upgrade alongside the fork's
+    # existing skip condition. Do not accept a changed condition, repository,
+    # or additional commands as though they were a version-only update.
+    skip = "if: steps.version.outputs.skip != 'true'"
+    if len(ours_text) == 1 and len(theirs_text) == 2 and theirs_text[0] == skip:
+        action_pattern = (
+            r"uses: pnpm/action-setup@(?:v[0-9]+(?:\.[0-9]+){0,2}|[0-9a-f]{40})"
+            r"(?: # [^\n]+)?"
+        )
+        if re.fullmatch(action_pattern, ours_text[0]) and re.fullmatch(
+            action_pattern, theirs_text[1]
+        ):
+            return [theirs[0]] + ours
+
+    headless_steps = {
+        "- name: Resolve headless-shell stable version",
+        "- name: Extract and release headless-shell",
+    }
     if (
-        any("id: headless" in line for line in normalized(ours))
+        ours_text[:1] == ["- name: Resolve headless-shell stable version"]
+        and "id: headless" in ours_text
+        and all(
+            line in headless_steps
+            for line in ours_text
+            if line.startswith("- name:")
+        )
         and theirs_text
         and theirs_text[0].startswith("# The headless-shell (Chromium) release step")
+        and all(line.startswith("#") for line in theirs_text)
         and any("does not" in line or "is intentionally omitted" in line for line in theirs_text)
     ):
         return theirs
@@ -393,76 +428,46 @@ def resolve_palette_hunk(
 ASSIGNMENT_RE = re.compile(r"^s\.(?P<field>[A-Za-z0-9_]+) = \S.*$")
 
 
-def is_import(line: str) -> bool:
-    stripped = line.strip()
-    return stripped.startswith('"') and stripped.endswith('"')
+def resolve_server_hunk(
+    ours: list[str], theirs: list[str], base_text: str
+) -> list[str]:
+    """Keep upstream edits and the deploy commit's two reviewed additions.
 
-
-def assignment_fields(lines: list[str]) -> dict[str, list[str]]:
-    """Map each struct field to the assignment lines one side makes to it."""
-    fields: dict[str, list[str]] = {}
-    for line in lines:
-        match = ASSIGNMENT_RE.match(line.strip())
-        if match:
-            fields.setdefault(match.group("field"), []).append(line.strip())
-    return fields
-
-
-def resolve_server_hunk(ours: list[str], theirs: list[str]) -> list[str]:
-    """Keep independent additive lines in NewServer.
-
-    Upstream and the deploy feature both add lines to the same place in
-    NewServer: imports of new packages, and single-line assignments to
-    struct fields. Distinct fields are independent, so keeping both is the
-    resolution.
-
-    When both sides assign the same field, the deploy commit is carrying a
-    stale copy of a line upstream owns and has since changed, so upstream's
-    line is the truth. The exception is the fork's own deploy assignment: a
-    duplicate there would mean upstream and the fork disagree about the same
-    field, which is a real conflict.
+    Rebase HEAD is upstream. Stage 1 is the replayed commit's parent, so a
+    line unchanged from stage 1 is inherited context, not a fork addition.
+    In particular, never resurrect an import upstream deliberately removed.
     """
-    content = [line for line in ours + theirs if line.strip()]
+    upstream, fork = normalized(ours), normalized(theirs)
+    content = upstream + fork
     if not content:
         raise ValueError("empty server/server.go conflict")
+    imports = all(re.fullmatch(r'"[A-Za-z0-9_./-]+"', line) for line in content)
+    assignments = all(ASSIGNMENT_RE.fullmatch(line) for line in content)
+    if not imports and not assignments:
+        raise ValueError("unknown server/server.go conflict")
+    if assignments:
+        for side in (upstream, fork):
+            fields = [ASSIGNMENT_RE.fullmatch(line)["field"] for line in side]
+            if len(set(fields)) != len(fields):
+                raise ValueError("multiple assignments to the same field")
+        if any(
+            ASSIGNMENT_RE.fullmatch(line)["field"] == "deployManager"
+            and line != DEPLOY_ASSIGNMENT
+            for line in content
+        ):
+            raise ValueError("server/server.go disagrees about s.deployManager")
 
-    imports = [line for line in content if is_import(line)]
-    upstream = assignment_fields(ours)
-    deploy = assignment_fields(theirs)
-
-    kept: list[str] = []
-    seen: set[str] = set()
-    for line in content:
-        if is_import(line):
-            continue
-        match = ASSIGNMENT_RE.match(line.strip())
-        if not match:
-            raise ValueError(
-                "server/server.go conflict is not an additive import or "
-                f"single-line assignment: {line.strip()!r}"
-            )
-        field = match.group("field")
-        if field in seen:
-            continue
-        seen.add(field)
-        both = upstream.get(field), deploy.get(field)
-        if both[0] and both[1] and set(both[0]) != set(both[1]):
-            if DEPLOY_ASSIGNMENT in both[0] + both[1]:
-                raise ValueError(
-                    f"server/server.go disagrees about s.{field}, "
-                    "which the deploy feature owns"
-                )
-            # The deploy commit echoes a line upstream owns and has since
-            # changed, so upstream's line is the truth.
-            kept.append(both[0][0] + "\n")
-            continue
-        kept.append(line)
-
-    imports.sort(key=str.strip)
-    return imports + kept
+    addition = '"shelley.exe.dev/server/deploy"' if imports else DEPLOY_ASSIGNMENT
+    base = set(normalized(base_text.splitlines()))
+    if any(line != addition and line not in base for line in fork):
+        raise ValueError("unreviewed fork addition in server/server.go")
+    kept = [line for line in ours if line.strip()]
+    if addition in fork and addition not in upstream:
+        kept.extend(line for line in theirs if line.strip() == addition)
+    return kept
 
 
-def resolve_text(name: str, text: str) -> str:
+def resolve_text(name: str, text: str, base_text: str = "") -> str:
     lines = text.splitlines(keepends=True)
     merged: list[str] = []
     i = 0
@@ -478,7 +483,7 @@ def resolve_text(name: str, text: str) -> str:
             raise ValueError(f"empty conflict in {name}")
 
         if name == "server/server.go":
-            replacement, consumed = resolve_server_hunk(ours, theirs), 0
+            replacement, consumed = resolve_server_hunk(ours, theirs, base_text), 0
         elif name == "README.md":
             replacement, consumed = resolve_readme_hunk(ours, theirs), 0
         elif name == "go.sum":
@@ -504,7 +509,11 @@ def resolve_text(name: str, text: str) -> str:
             merged.extend(replacement)
         i = after + consumed
 
-    return "".join(merged)
+    result = "".join(merged)
+    if name == "go.sum":
+        # Check hashes against the surrounding, non-conflicted lines too.
+        resolve_go_sum_hunk(result.splitlines(keepends=True), [])
+    return result
 
 
 def main() -> None:
@@ -520,12 +529,25 @@ def main() -> None:
     for name in conflicts:
         path = Path(name)
         if name in DELETED_PATHS:
+            stages = {
+                line.split()[2]
+                for line in subprocess.check_output(
+                    ["git", "ls-files", "--unmerged", "--", name], text=True
+                ).splitlines()
+            }
+            if stages != {"1", "2"}:
+                raise SystemExit(f"{name}: expected upstream modify/fork delete")
             if path.exists():
                 path.unlink()
             subprocess.run(["git", "rm", "--quiet", "--", name], check=True)
             continue
         try:
-            path.write_text(resolve_text(name, path.read_text()))
+            base_text = ""
+            if name == "server/server.go":
+                base_text = subprocess.check_output(
+                    ["git", "show", f":1:{name}"], text=True
+                )
+            path.write_text(resolve_text(name, path.read_text(), base_text))
         except ValueError as error:
             raise SystemExit(f"{name}: {error}") from error
         if name == "server/server.go":
