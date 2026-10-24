@@ -1,3 +1,7 @@
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 from resolve_upstream_conflicts import resolve_text
@@ -310,7 +314,7 @@ import (
 @@START@@ HEAD
     "skills"
 @@SEPARATOR@@
-    "server/deploy"
+    "shelley.exe.dev/server/deploy"
 @@END@@ deploy
 )
 func initServer(s *Server) {
@@ -322,9 +326,12 @@ func initServer(s *Server) {
 @@END@@ deploy
 }
 ''')
-        resolved = resolve_text("server/server.go", server)
+        resolved = resolve_text(
+            "server/server.go", server,
+            "s.integrationSkills = discoverIntegrationSkillsAtStartup(logger)\n",
+        )
         self.assertNotIn("<<<<<<<", resolved)
-        self.assertIn('"server/deploy"', resolved)
+        self.assertIn('"shelley.exe.dev/server/deploy"', resolved)
         self.assertIn('"skills"', resolved)
         self.assertIn("s.integrationSkills = newIntegrationSkillCache", resolved)
         self.assertIn("s.deployManager = deploy.NewManager(nil)", resolved)
@@ -481,6 +488,121 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
         self.assertIn("mikesmitty/edkey", resolved)
         self.assertIn("ncruces/go-strftime", resolved)
 
+    def test_release_preserves_pinned_action_and_skip_guard(self):
+        for old, version in (
+            ("v4", "ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0"),
+            ("ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0", "v7"),
+        ):
+            with self.subTest(old=old, version=version):
+                hunk = conflict_fixture(f"""      - name: Set up pnpm
+@@START@@ HEAD
+        uses: pnpm/action-setup@{version}
+@@SEPARATOR@@
+        if: steps.version.outputs.skip != 'true'
+        uses: pnpm/action-setup@{old}
+@@END@@ fork
+        with:
+          package_json_file: ui/package.json
+""")
+                self.assertEqual(
+                    resolve_text(".github/workflows/release.yml", hunk),
+                    f"""      - name: Set up pnpm
+        if: steps.version.outputs.skip != 'true'
+        uses: pnpm/action-setup@{version}
+        with:
+          package_json_file: ui/package.json
+""",
+                )
+
+    def test_release_rejects_non_version_changes(self):
+        for ours, theirs in (
+            ("uses: other/action@v6", "if: steps.version.outputs.skip != 'true'\nuses: pnpm/action-setup@v4"),
+            ("uses: pnpm/action-setup@v6", "if: always()\nuses: pnpm/action-setup@v4"),
+            ("uses: pnpm/action-setup@v6\nrun: unexpected", "if: steps.version.outputs.skip != 'true'\nuses: pnpm/action-setup@v4"),
+        ):
+            with self.subTest(ours=ours, theirs=theirs), self.assertRaises(ValueError):
+                resolve_text(
+                    ".github/workflows/release.yml",
+                    f"<<<<<<< HEAD\n{ours}\n=======\n{theirs}\n>>>>>>> fork\n",
+                )
+
+    def test_headless_rule_cannot_discard_other_release_steps(self):
+        note = "# The headless-shell (Chromium) release step is intentionally omitted from\n"
+        for upstream, fork in (
+            ("- name: Unrelated\nid: headless\n", note),
+            ("- name: Resolve headless-shell stable version\nid: headless\n- name: Unrelated\n", note),
+            ("- name: Resolve headless-shell stable version\nid: headless\n", note + "run: unrelated\n"),
+        ):
+            with self.subTest(upstream=upstream, fork=fork), self.assertRaises(ValueError):
+                resolve_text(
+                    ".github/workflows/release.yml",
+                    f"<<<<<<< HEAD\n{upstream}=======\n{fork}>>>>>>> fork\n",
+                )
+
+    def test_server_drops_only_inherited_imports_removed_by_upstream(self):
+        hunk = conflict_fixture('''import (
+@@START@@ HEAD
+@@SEPARATOR@@
+    "shelley.exe.dev/server/deploy"
+    "shelley.exe.dev/server/diskspace"
+@@END@@ fork
+    "shelley.exe.dev/server/resource"
+)
+''')
+        resolved = resolve_text(
+            "server/server.go", hunk, '"shelley.exe.dev/server/diskspace"\n'
+        )
+        self.assertNotIn("diskspace", resolved)
+        self.assertIn('"shelley.exe.dev/server/deploy"', resolved)
+        self.assertIn('"shelley.exe.dev/server/resource"', resolved)
+        # Without the base proving it is inherited, discarding it is unsafe.
+        with self.assertRaises(ValueError):
+            resolve_text("server/server.go", hunk)
+
+    def test_server_rejects_competing_or_unknown_fork_assignments(self):
+        for ours, theirs in (
+            ("s.other = upstream()", "s.other = fork()"),
+            ("s.deployManager = upstream()", "s.deployManager = fork()"),
+            ("s.other = upstream()", "s.other = one()\ns.other = two()"),
+            ("s.other = one()\ns.other = two()", "s.deployManager = deploy.NewManager(nil)"),
+        ):
+            with self.subTest(ours=ours, theirs=theirs), self.assertRaises(ValueError):
+                resolve_text(
+                    "server/server.go",
+                    f"<<<<<<< HEAD\n{ours}\n=======\n{theirs}\n>>>>>>> fork\n",
+                )
+
+    def test_readme_rejects_marker_mentions_and_unknown_replacements(self):
+        for ours, theirs in (
+            ("Important content mentioning # Architecture", "replacement"),
+            ("# Architecture\nThe technical stack is Go for the backend", "arbitrary new text"),
+            ("# Architecture\nThe technical stack is Go for the backend\n# Security\nImportant", "### Build from source (any machine)"),
+            ("# Architecture", "### Build from source (any machine)"),
+        ):
+            with self.subTest(ours=ours, theirs=theirs), self.assertRaises(ValueError):
+                resolve_text(
+                    "README.md",
+                    f"<<<<<<< HEAD\n{ours}\n=======\n{theirs}\n>>>>>>> fork\n",
+                )
+
+    def test_go_sum_rejects_malformed_and_competing_hashes(self):
+        a, b = "A" * 43 + "=", "B" * 43 + "="
+        for ours, theirs in (
+            ("not a checksum", "also invalid"),
+            (f"example.com/mod v1.0.0 h1:{a}", f"example.com/mod v1.0.0 h1:{b}"),
+        ):
+            with self.subTest(ours=ours), self.assertRaises(ValueError):
+                resolve_text(
+                    "go.sum",
+                    f"<<<<<<< HEAD\n{ours}\n=======\n{theirs}\n>>>>>>> fork\n",
+                )
+        with self.assertRaises(ValueError):
+            resolve_text(
+                "go.sum",
+                f"example.com/mod v1.0.0 h1:{a}\n"
+                f"<<<<<<< HEAD\n=======\nexample.com/mod v1.0.0 h1:{b}\n>>>>>>> fork\n",
+            )
+
     def test_rejects_unknown_hunks_and_paths(self):
         with self.assertRaises(ValueError):
             resolve_text(
@@ -537,6 +659,84 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
                 "ui/src/vue/components/ChatInterface.vue",
                 "<<<<<<< ours\n<UnknownSlot />\n=======\n<UnknownProp />\n>>>>>>> theirs\n",
             )
+
+
+class GitConflictResolverTest(unittest.TestCase):
+    """Exercise stage-1 reading and staging, not just string transformations."""
+
+    def test_deleted_publisher_requires_modify_delete_stages(self):
+        resolver = Path(__file__).with_name("resolve_upstream_conflicts.py").resolve()
+        name = ".github/workflows/publish-version-metadata.yml"
+        for stages in ((1, 2), (1, 2, 3), (1, 3)):
+            with self.subTest(stages=stages), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                subprocess.run(
+                    ["git", "init", "-q", temp], check=True, capture_output=True
+                )
+                blob = subprocess.check_output(
+                    ["git", "hash-object", "-w", "--stdin"], input="publisher\n",
+                    text=True, cwd=root,
+                ).strip()
+                subprocess.run(
+                    ["git", "update-index", "--index-info"], cwd=root, check=True,
+                    input="".join(f"100644 {blob} {stage}\t{name}\n" for stage in stages),
+                    text=True,
+                )
+                path = root / name
+                path.parent.mkdir(parents=True)
+                path.write_text("publisher\n")
+                result = subprocess.run(
+                    [sys.executable, str(resolver)], cwd=root,
+                    text=True, capture_output=True,
+                )
+                if stages == (1, 2):
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertFalse(path.exists())
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("expected upstream modify/fork delete", result.stderr)
+                    self.assertEqual(path.read_text(), "publisher\n")
+
+    def test_server_import_rebase(self):
+        resolver = Path(__file__).with_name("resolve_upstream_conflicts.py").resolve()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def git(*args, check=True):
+                return subprocess.run(
+                    ["git", *args], cwd=root, text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check,
+                )
+
+            git("init", "-b", "base")
+            git("config", "user.name", "Resolver test")
+            git("config", "user.email", "resolver@example.test")
+            path = root / "server/server.go"
+            path.parent.mkdir()
+            path.write_text('package server\nimport (\n"shelley.exe.dev/server/diskspace"\n)\n')
+            git("add", ".")
+            git("commit", "-m", "base")
+            git("checkout", "-b", "fork")
+            path.write_text(
+                'package server\nimport (\n"shelley.exe.dev/server/deploy"\n'
+                '"shelley.exe.dev/server/diskspace"\n)\n'
+            )
+            git("commit", "-am", "deploy import")
+            git("checkout", "-b", "upstream", "base")
+            path.write_text(
+                'package server\nimport (\n"shelley.exe.dev/server/resource"\n)\n'
+            )
+            git("commit", "-am", "replace diskspace with resource")
+            git("checkout", "fork")
+            result = git("rebase", "upstream", check=False)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            subprocess.run([sys.executable, str(resolver)], cwd=root, check=True)
+            self.assertEqual(git("diff", "--name-only", "--diff-filter=U").stdout, "")
+            staged = git("show", ":server/server.go").stdout
+            self.assertNotIn("diskspace", staged)
+            self.assertIn('"shelley.exe.dev/server/deploy"', staged)
+            self.assertIn('"shelley.exe.dev/server/resource"', staged)
+            git("-c", "core.editor=true", "rebase", "--continue")
 
 
 if __name__ == "__main__":
