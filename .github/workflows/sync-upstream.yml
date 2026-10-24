@@ -3,9 +3,8 @@ name: Sync upstream & release
 # Keeps shelley-playground fresh: every day at 03:00 UTC (and on demand),
 # fetch upstream boldsoftware/shelley main, rebase the playground commits
 # onto it, and publish a GitHub release with cross-compiled binaries via
-# goreleaser. If upstream hasn't moved, we still re-release when the latest
-# release tag is older than a day or missing — so the Releases page is
-# always fresh.
+# goreleaser. A rebased push runs Test and then Release. If upstream hasn't
+# moved, release this commit only when its version tag does not exist.
 
 on:
   schedule:
@@ -131,12 +130,12 @@ jobs:
         if: steps.release-check.outputs.exists == 'false'
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
           cache: true
 
       - name: Set up pnpm
         if: steps.release-check.outputs.exists == 'false'
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           package_json_file: ui/package.json
 
@@ -144,7 +143,7 @@ jobs:
         if: steps.release-check.outputs.exists == 'false'
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version-file: ui/.nvmrc
           cache: 'pnpm'
           cache-dependency-path: ui/pnpm-lock.yaml
 
