@@ -40,10 +40,32 @@ namespaces. Editing upstream files is sometimes necessary and is allowed.
 Review and test those edits rather than avoiding a real fix to save a merge.
 Do not modify existing shared migrations; use new migrations and new tables.
 
-The fork currently replaces much of README. That choice has repeatedly caused
-conflicts when upstream edits the removed prose. Do not put operational detail
-back into README; link to this guide. If the same conflict keeps recurring,
-consider reducing the fork patch instead of indefinitely widening its resolver.
+The fork owns **README.md** and replaces most of it. Do not put operational
+detail back into README; link to this guide.
+
+Between October 12 and October 28 that ownership was modelled as a list of
+acceptable hunk *shapes*, and the nightly sync failed six times, each time
+because upstream's next prose edit made git align the same replacement
+differently:
+
+| Date | Upstream change | New shape |
+|---|---|---|
+| Oct 12 | added a site link to the intro | intro replacement |
+| Oct 16 | added an idle-compaction paragraph | Architecture tail vs build block |
+| Oct 21 | reworded and deleted trailing blank | empty-ours tail replacement |
+| Oct 23 | added a heading inside the deleted tail | upstream tail vs one fork heading |
+| Oct 28 | moved build instructions to mise | build block vs replacement subsection |
+
+Enumerating alignments does not converge: every shape was correct, and each
+one was blind to the next. The rule now models the actual invariant — the fork
+owns the file — and guards the one thing ownership must not swallow: if
+upstream introduces a **heading its pre-rebase README lacked**, it has added a
+section the fork has never seen, and the sync aborts for a human.
+
+That inversion is the general lesson. When the same file keeps re-conflicting,
+stop adding rules for each alignment and ask which side owns the file and what
+must provably survive. A per-shape rule set looks safe because each rule is
+narrow, but it fails *at 03:00*, once per upstream prose edit, forever.
 
 ## Resolver safety and tests
 
@@ -76,8 +98,16 @@ Current reviewed policies:
   known additions. Inherited lines are identified from Git stage 1, not guessed
   from a field name. This prevents resurrecting imports upstream removed. An
   unfamiliar fork addition or competing `s.deployManager` value aborts.
-- **README:** only the reviewed fork introduction and tail-replacement shapes
-  are accepted. An incidental Architecture/History mention is not sufficient.
+- **README:** the fork's side wins wholesale, because the fork owns the file.
+  The resolver aborts if upstream's side introduces a heading absent from the
+  pre-rebase file (a new upstream section), and the merged result must still
+  contain the fork's title and the `shelley.dev` link.
+- **Node setup:** upstream replaced the two pinned setup actions with one
+  `scripts/with-node` step and deleted `ui/.nvmrc`. Adopt upstream's step and
+  re-apply the fork's release-skip condition in `release.yml`; anything other
+  than that exact step aborts. `sync-upstream.yml` is fork-only, so it merges
+  clean and is **not** covered by this rule — check it by hand after an
+  upstream toolchain change.
 - **Release workflow:** preserve the upstream pnpm action upgrade together
   with the fork's unchanged release-skip guard. Other commands, repositories,
   and conditions are not version-only changes.
