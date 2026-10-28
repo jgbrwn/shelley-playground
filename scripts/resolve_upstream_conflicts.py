@@ -22,6 +22,8 @@ KNOWN_PATHS = {
     "ui/src/vue/components/ChatOverflowMenu.vue",
     "ui/src/vue/components/CommandPalette.vue",
     ".github/workflows/release.yml",
+    ".github/workflows/test.yml",
+    ".github/workflows/sync-upstream.yml",
 }
 
 DEPLOY_ASSIGNMENT = (
@@ -221,82 +223,98 @@ def resolve_chat_interface_hunk(ours: list[str], theirs: list[str]) -> list[str]
     raise ValueError("unknown ChatInterface.vue conflict hunk")
 
 
-def resolve_readme_hunk(ours: list[str], theirs: list[str]) -> list[str]:
-    """Keep upstream links that survive, with the fork's replacement content.
+def resolve_readme_hunk(
+    ours: list[str], theirs: list[str], base_text: str
+) -> list[str]:
+    """The fork owns README.md; keep its text, guard against new upstream sections.
 
-    The Playground README deliberately replaces two upstream regions: the
-    generic Shelley introduction and the Architecture/History tail. Upstream
-    edits inside those regions re-conflict on every rebase; the fork's
-    replacement wins, keeping upstream's site link in the intro.
+    The Playground README replaces upstream's introduction, installation, and
+    Architecture/History tail. Git aligns that replacement differently
+    depending on where upstream's latest edit lands, so enumerating shapes
+    never ends: every upstream prose edit produces a new alignment.
+
+    Ownership is the invariant instead: the fork's side wins wholesale, and
+    resolve_text checks the merged file still looks like the fork's README.
+    The guard here is structural: if upstream introduced a heading that its
+    own pre-rebase README lacked, upstream added a section the fork has never
+    seen, so the sync stops for a human.
     """
-    ours_text, theirs_text = normalized(ours), normalized(theirs)
-    if (
-        ours_text
-        and ours_text[0] == "[shelley.dev](https://shelley.dev/)"
-        and theirs_text
-        and theirs_text[0].startswith("**Shelley Playground** is a fork of")
-    ):
-        # Preserve the upstream website link, but not the displaced
-        # boilerplate; the fork's intro and upstream attribution follow in
-        # the surrounding README.
-        return [ours[0], "\n"] + theirs
+    theirs_text = normalized(theirs)
+    if not theirs_text:
+        raise ValueError("empty README.md fork side")
 
-    if (
-        ours_text
-        and ours_text[0].startswith("The technical stack is Go for the backend")
-        and theirs_text[:3]
-        == [
-            "```bash",
-            "git clone https://github.com/jgbrwn/shelley-playground.git",
-            "cd shelley-playground",
-        ]
-        and any(line.startswith("make") for line in theirs_text[3:])
-    ):
-        # Upstream's Architecture/History tail was replaced by a pointer to
-        # ARCHITECTURE.md. The fork's build-from-source block closes with the
-        # shared fence after the conflict, so keep it verbatim.
-        return theirs
-
-    if (
-        not ours_text
-        and theirs_text[:1]
-        == [
-            "See upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLite, Vue 3 + PrimeVue)."
-        ]
-        and any("customizing-shelley" in line for line in theirs_text)
-    ):
-        # Upstream edited the tail that the fork deletes, so git can only
-        # express the replacement as "upstream ends here, the fork's tail
-        # begins". The fork's tail wins verbatim: it already opens with the
-        # blank line that follows the shared build-block fence.
-        return theirs
-
-    # Upstream edited somewhere inside the Architecture/History tail that the
-    # fork deletes wholesale. Depending on where the edit lands, git aligns the
-    # hunk differently -- sometimes the upstream tail is "ours" against a small
-    # fragment of the fork's replacement. The fork's text wins either way;
-    # upstream's tail is exactly the prose being removed.
-    upstream_tail_headings = {
-        "# Architecture",
-        "# History",
-        "# Shelley's Name",
-        "# Open source",
-        "# Building Shelley",
+    base_headings = {
+        line.strip()
+        for line in base_text.splitlines()
+        if re.match(r"^#{1,6} ", line.strip())
     }
-    if (
-        ours_text[:1] == ["# Architecture"]
-        and len(ours_text) > 1
-        and ours_text[1].startswith("The technical stack is Go for the backend")
-        and all(
-            line in upstream_tail_headings
-            for line in ours_text
-            if line.startswith("#")
-        )
-        and theirs_text == ["### Build from source (any machine)"]
-    ):
-        return theirs
+    added = [
+        line.strip()
+        for line in ours
+        if re.match(r"^#{1,6} ", line.strip()) and line.strip() not in base_headings
+    ]
+    if added:
+        raise ValueError(f"upstream added README sections: {added}")
 
-    raise ValueError("unknown README.md conflict hunk")
+    return theirs
+
+
+def resolve_node_setup_hunk(
+    ours: list[str], theirs: list[str], skip_guarded: bool
+) -> list[str]:
+    """Adopt upstream's mise-pinned Node setup, keeping the fork's skip guard.
+
+    Upstream replaced the two pinned-action setup steps with one
+    `scripts/with-node` step. `ui/.nvmrc` no longer exists there, so the fork's
+    copy of the old steps is stale by construction. Keep upstream's step and
+    re-apply the fork's release-skip condition; in the sync and test workflows
+    there is no such condition, so keep the step as-is.
+    """
+    # Accept only upstream's reviewed step: name, `run: |`, the with-node call,
+    # and the GITHUB_PATH append. Anything else stops the sync.
+    if (
+        normalized(ours)[:3]
+        != ["- name: Set up Node.js and pnpm", "run: |", 'dirs="$(scripts/with-node)"']
+        or len(normalized(ours)) != 4
+        or not normalized(ours)[3].startswith('echo "${dirs//:/')
+        or not normalized(ours)[3].endswith('>> "$GITHUB_PATH"')
+    ):
+        raise ValueError("unknown Node setup conflict hunk")
+    if skip_guarded:
+        skip = "if: steps.version.outputs.skip != 'true'"
+        pinned = [
+            "- name: Set up pnpm",
+            skip,
+            "uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0",
+            "with:",
+            "package_json_file: ui/package.json",
+            "- name: Set up Node.js",
+            skip,
+            "uses: actions/setup-node@v4",
+            "with:",
+            "node-version-file: ui/.nvmrc",
+            "cache: 'pnpm'",
+            "cache-dependency-path: ui/pnpm-lock.yaml",
+        ]
+    else:
+        pinned = [
+            "- name: Set up pnpm",
+            "uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0",
+            "with:",
+            "package_json_file: ui/package.json",
+            "- name: Set up Node.js",
+            "uses: actions/setup-node@v4",
+            "with:",
+            "node-version-file: ui/.nvmrc",
+            "cache: 'pnpm'",
+            "cache-dependency-path: ui/pnpm-lock.yaml",
+        ]
+    if normalized(theirs) != pinned:
+        raise ValueError("unexpected fork Node setup steps")
+    if not skip_guarded:
+        return ours
+    indent = " " * (len(ours[0]) - len(ours[0].lstrip()))
+    return [ours[0], indent + "  " + pinned[1] + "\n"] + ours[1:]
 
 
 def resolve_release_workflow_hunk(ours: list[str], theirs: list[str]) -> list[str]:
@@ -485,7 +503,7 @@ def resolve_text(name: str, text: str, base_text: str = "") -> str:
         if name == "server/server.go":
             replacement, consumed = resolve_server_hunk(ours, theirs, base_text), 0
         elif name == "README.md":
-            replacement, consumed = resolve_readme_hunk(ours, theirs), 0
+            replacement, consumed = resolve_readme_hunk(ours, theirs, base_text), 0
         elif name == "go.sum":
             replacement, consumed = resolve_go_sum_hunk(ours, theirs), 0
         elif name == "ui/src/vue/App.vue":
@@ -493,7 +511,16 @@ def resolve_text(name: str, text: str, base_text: str = "") -> str:
         elif name == "ui/src/vue/components/ChatInterface.vue":
             replacement, consumed = resolve_chat_interface_hunk(ours, theirs), 0
         elif name == ".github/workflows/release.yml":
-            replacement, consumed = resolve_release_workflow_hunk(ours, theirs), 0
+            try:
+                replacement = resolve_node_setup_hunk(ours, theirs, skip_guarded=True)
+            except ValueError:
+                replacement = resolve_release_workflow_hunk(ours, theirs)
+            consumed = 0
+        elif name in (
+            ".github/workflows/test.yml",
+            ".github/workflows/sync-upstream.yml",
+        ):
+            replacement, consumed = resolve_node_setup_hunk(ours, theirs, skip_guarded=False), 0
         elif name == "ui/src/vue/components/ChatOverflowMenu.vue":
             replacement, consumed = resolve_chat_overflow_menu_hunk(ours, theirs), 0
         elif name == "ui/src/vue/components/CommandPalette.vue":
@@ -510,6 +537,10 @@ def resolve_text(name: str, text: str, base_text: str = "") -> str:
         i = after + consumed
 
     result = "".join(merged)
+    if name == "README.md":
+        for marker in ("# Shelley Playground", "[shelley.dev](https://shelley.dev/)"):
+            if marker not in result:
+                raise ValueError(f"resolved README.md lost its {marker!r}")
     if name == "go.sum":
         # Check hashes against the surrounding, non-conflicted lines too.
         resolve_go_sum_hunk(result.splitlines(keepends=True), [])
@@ -543,7 +574,7 @@ def main() -> None:
             continue
         try:
             base_text = ""
-            if name == "server/server.go":
+            if name in ("server/server.go", "README.md"):
                 base_text = subprocess.check_output(
                     ["git", "show", f":1:{name}"], text=True
                 )
