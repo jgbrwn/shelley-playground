@@ -35,7 +35,9 @@ jobs:
           git config --global user.name "Test User"
 
       - name: Test upstream conflict resolver
-        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_resolve_upstream_conflicts.py
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_resolve_upstream_conflicts.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_check_deleted_paths.py
 
       - name: Install UI dependencies
         run: |
