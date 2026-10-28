@@ -16,98 +16,102 @@ def conflict_fixture(text):
 
 
 class ConflictResolverTest(unittest.TestCase):
-    def test_readme_keeps_upstream_site_link_and_playground_intro(self):
-        readme = conflict_fixture('''# Shelley Playground — exe.dev-Deployer
+    def test_readme_keeps_fork_text_and_upstream_site_link(self):
+        # The fork owns README.md: its text wins even where git aligned the
+        # hunk against unrelated upstream prose (a shape that changed six
+        # times), while the shelley.dev link the intro keeps survives.
+        base = "# Shelley\n\n[shelley.dev](https://shelley.dev/)\n\n# Installation\n"
+        hunk = conflict_fixture('''# Shelley Playground
 
-@@START@@ HEAD
 [shelley.dev](https://shelley.dev/)
 
-Shelley is a mobile-friendly, web-based, multi-conversation, multi-modal,
-multi-model, single-user coding agent built for but not exclusive to
-[exe.dev](https://exe.dev/). It does not come with authorization or sandboxing:
-bring your own.
-@@SEPARATOR@@
-**Shelley Playground** is a fork of [Shelley](https://github.com/boldsoftware/shelley) (by [Bold Software](https://github.com/boldsoftware)) that you can install on your MacBook or Linux system — or use to **replace Shelley on an existing exe.dev VM**.
-@@END@@ deploy
-> Upstream: **https://github.com/boldsoftware/shelley**
-''')
-        resolved = resolve_text("README.md", readme)
-        self.assertNotIn("<<<<<<<", resolved)
-        self.assertIn("# Shelley Playground — exe.dev-Deployer", resolved)
-        self.assertIn("[shelley.dev](https://shelley.dev/)", resolved)
-        self.assertIn("**Shelley Playground** is a fork", resolved)
-        self.assertIn("> Upstream:", resolved)
-        self.assertNotIn("bring your own.", resolved)
-
-    def test_readme_keeps_fork_build_block_over_upstream_architecture_tail(self):
-        # Upstream extended its Architecture section (idle compaction); the
-        # fork replaced that whole tail with a pointer to ARCHITECTURE.md.
-        readme = conflict_fixture('''### Build from source (any machine)
-
 @@START@@ HEAD
-The technical stack is Go for the backend, SQLite for storage, and Typescript
-with Vue 3 + PrimeVue for the UI.
-
-A profile's `idle_compaction_minutes` makes its top-level conversations compact
-once idle that long after a turn.
-
-# History
-
-Shelley is partially based on our previous coding agent effort, [Sketch](https://github.com/boldsoftware/sketch).
-
-# Shelley's Name
-
-Shelley is so named because the main tool it uses is the shell, and I like
-putting "-ey" at the end of words.
-
-```
-socat TCP-LISTEN:9001,fork TCP:localhost:9000
+You'll need Go. `make` installs the Node.js and pnpm pinned in
+`ui/mise.toml` (see `scripts/with-node`).
 @@SEPARATOR@@
+### Replacing the Shelley that already runs on a fresh exe.dev VM
+
+Most users meet Shelley for the first time on a fresh exe.dev VM.
+@@END@@ fork
+
 ```bash
-git clone https://github.com/jgbrwn/shelley-playground.git
-cd shelley-playground
-make        # or `make build-custom` for a stamped, deploy-capable binary
-@@END@@ deploy
+git clone https://github.com/jgbrwn/shelley-playground
 ```
-
-See upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLite, Vue 3 + PrimeVue).
 ''')
-        resolved = resolve_text("README.md", readme)
+        resolved = resolve_text("README.md", hunk, base)
         self.assertNotIn("<<<<<<<", resolved)
-        self.assertIn("git clone https://github.com/jgbrwn/shelley-playground.git", resolved)
-        self.assertIn("make        # or `make build-custom`", resolved)
-        self.assertEqual(resolved.count("```"), 2)
-        self.assertNotIn("The technical stack is Go", resolved)
-        self.assertNotIn("socat TCP-LISTEN", resolved)
-        self.assertIn("[ARCHITECTURE.md](ARCHITECTURE.md)", resolved)
+        self.assertIn("### Replacing the Shelley that already runs", resolved)
+        self.assertIn("git clone https://github.com/jgbrwn/shelley-playground", resolved)
+        self.assertNotIn("ui/mise.toml", resolved)
+        self.assertIn("[shelley.dev](https://shelley.dev/)", resolved)
 
-    def test_readme_keeps_fork_tail_when_upstream_edited_the_deleted_tail(self):
-        # Upstream reworded the compaction paragraph it deletes, so git can
-        # only express the replacement as an empty upstream side followed by
-        # the fork's whole tail.
-        readme = conflict_fixture('''make        # or `make build-custom` for a stamped, deploy-capable binary
-```
-@@START@@ HEAD
-@@SEPARATOR@@
-
-See upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLite, Vue 3 + PrimeVue).
-
----
-
-## Keeping it fresh: rebasing against upstream Shelley
-
-- Shelley skill for customizing your own Shelley: search for `customizing-shelley` in the repo's `AGENTS.md`
-@@END@@ deploy
-''')
-        resolved = resolve_text("README.md", readme)
+    def test_readme_aborts_when_upstream_adds_a_section(self):
+        base = "# Shelley\n\n[shelley.dev](https://shelley.dev/)\n\n# Installation\n"
+        upstream = "[shelley.dev](https://shelley.dev/)\n\n# Installation\n\n# Brand New Section\n"
+        for hunk in (
+            f"<<<<<<< HEAD\n{upstream}=======\n# Forked\n>>>>>>> fork\n",
+            f"{base}\n<<<<<<< HEAD\n{upstream}=======\n# Forked\n>>>>>>> fork\n",
+        ):
+            with self.subTest(hunk=hunk), self.assertRaises(ValueError):
+                resolve_text("README.md", hunk, base)
+        # A heading upstream already had in the pre-rebase file is not new.
+        rewritten = (
+            "# Shelley Playground\n\n[shelley.dev](https://shelley.dev/)\n"
+            "<<<<<<< HEAD\n# Installation\n=======\n"
+            "# Shelley Playground\n>>>>>>> fork\n"
+        )
+        resolved = resolve_text("README.md", rewritten, base)
         self.assertNotIn("<<<<<<<", resolved)
-        self.assertIn("make        # or `make build-custom`", resolved)
-        self.assertIn("[ARCHITECTURE.md](ARCHITECTURE.md)", resolved)
-        self.assertIn("## Keeping it fresh", resolved)
-        # The blank line separating the fence from the fork's tail is not
-        # doubled by the resolution.
-        self.assertIn("```\n\nSee upstream [ARCHITECTURE.md]", resolved)
-        self.assertNotIn("```\n\n\n", resolved)
+
+    def test_node_setup_adopts_upstream_mise_step(self):
+        ours = (
+            "      - name: Set up Node.js and pnpm\n"
+            "        run: |\n"
+            '          dirs="$(scripts/with-node)"\n'
+            "          echo \"${dirs//:/$'\\n'}\" >> \"$GITHUB_PATH\"\n"
+        )
+        guarded = (
+            "        - name: Set up pnpm\n"
+            "          if: steps.version.outputs.skip != 'true'\n"
+            "          uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0\n"
+            "          with:\n"
+            "            package_json_file: ui/package.json\n"
+            "        - name: Set up Node.js\n"
+            "          if: steps.version.outputs.skip != 'true'\n"
+            "          uses: actions/setup-node@v4\n"
+            "          with:\n"
+            "            node-version-file: ui/.nvmrc\n"
+            "            cache: 'pnpm'\n"
+            "            cache-dependency-path: ui/pnpm-lock.yaml\n"
+        )
+        # release.yml: keep the release-skip guard on upstream's step.
+        resolved = resolve_text(
+            ".github/workflows/release.yml",
+            f"<<<<<<< HEAD\n{ours}=======\n{guarded}>>>>>>> fork\n",
+        )
+        self.assertIn("scripts/with-node", resolved)
+        self.assertIn("if: steps.version.outputs.skip != 'true'", resolved)
+        self.assertNotIn("ui/.nvmrc", resolved)
+        self.assertNotIn("pnpm/action-setup", resolved)
+
+        # test.yml/sync-upstream.yml: the same steps without a guard.
+        unguarded = guarded.replace("          if: steps.version.outputs.skip != 'true'\n", "")
+        for path in (".github/workflows/test.yml", ".github/workflows/sync-upstream.yml"):
+            with self.subTest(path=path):
+                out = resolve_text(
+                    path, f"<<<<<<< HEAD\n{ours}=======\n{unguarded}>>>>>>> fork\n"
+                )
+                self.assertIn("scripts/with-node", out)
+                self.assertNotIn("ui/.nvmrc", out)
+
+        # Anything else in that position still stops the sync.
+        for path in (".github/workflows/test.yml", ".github/workflows/release.yml"):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                resolve_text(
+                    path,
+                    "<<<<<<< HEAD\n- name: Set up Node.js and pnpm\n"
+                    "=======\n- name: Something else\n>>>>>>> fork\n",
+                )
 
     def test_release_workflow_drops_upstream_headless_shell_steps(self):
         # Upstream keeps editing its headless-shell release steps; the fork
@@ -170,42 +174,6 @@ See upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLit
             resolved.index("s.listIntegrations"),
             resolved.index("s.deployManager"),
         )
-
-    def test_readme_keeps_fork_heading_when_upstream_edits_inside_deleted_tail(
-        self,
-    ):
-        # Upstream edited a line inside the Architecture/History tail the fork
-        # deletes, so git aligned the hunk with upstream's whole tail as "ours"
-        # against a single fork heading.
-        readme = conflict_fixture("""README BEFORE
-@@START@@ HEAD
-# Architecture
-
-The technical stack is Go for the backend, SQLite for storage, and Typescript
-with Vue 3 + PrimeVue for the UI.
-
-# History
-
-Shelley is based on Sketch.
-
-# Building Shelley
-
-Run `make`. Run `make serve` to start Shelley locally, or `make serve-dev`.
-@@SEPARATOR@@
-### Build from source (any machine)
-@@END@@ deploy
-
-```bash
-git clone https://github.com/jgbrwn/shelley-playground.git
-```
-""")
-        resolved = resolve_text("README.md", readme)
-        self.assertNotIn("<<<<<<<", resolved)
-        self.assertIn("### Build from source (any machine)", resolved)
-        self.assertIn("git clone https://github.com/jgbrwn/shelley-playground.git", resolved)
-        self.assertNotIn("The technical stack is Go", resolved)
-        self.assertNotIn("# Architecture", resolved)
-        self.assertNotIn("make serve-dev", resolved)
 
     def test_app_preserves_favicon_and_deploy_features(self):
         app = conflict_fixture('''<template>
@@ -572,19 +540,6 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
                     f"<<<<<<< HEAD\n{ours}\n=======\n{theirs}\n>>>>>>> fork\n",
                 )
 
-    def test_readme_rejects_marker_mentions_and_unknown_replacements(self):
-        for ours, theirs in (
-            ("Important content mentioning # Architecture", "replacement"),
-            ("# Architecture\nThe technical stack is Go for the backend", "arbitrary new text"),
-            ("# Architecture\nThe technical stack is Go for the backend\n# Security\nImportant", "### Build from source (any machine)"),
-            ("# Architecture", "### Build from source (any machine)"),
-        ):
-            with self.subTest(ours=ours, theirs=theirs), self.assertRaises(ValueError):
-                resolve_text(
-                    "README.md",
-                    f"<<<<<<< HEAD\n{ours}\n=======\n{theirs}\n>>>>>>> fork\n",
-                )
-
     def test_go_sum_rejects_malformed_and_competing_hashes(self):
         a, b = "A" * 43 + "=", "B" * 43 + "="
         for ours, theirs in (
@@ -614,22 +569,11 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
                 "ui/src/vue/Unknown.vue",
                 "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n",
             )
+        # The fork owns README.md, but only while upstream adds no sections.
         with self.assertRaises(ValueError):
             resolve_text(
                 "README.md",
-                "<<<<<<< ours\nunknown\n=======\nunknown\n>>>>>>> theirs\n",
-            )
-        with self.assertRaises(ValueError):
-            resolve_text(
-                "README.md",
-                "<<<<<<< ours\nSomething upstream entirely new\n=======\nunknown\n>>>>>>> theirs\n",
-            )
-        # An empty-ours hunk is only accepted when the fork's own tail anchors
-        # it; anything else must still fail closed.
-        with self.assertRaises(ValueError):
-            resolve_text(
-                "README.md",
-                "<<<<<<< ours\n=======\nSee upstream [ARCHITECTURE.md](ARCHITECTURE.md) for the stack details (Go, SQLite, Vue 3 + PrimeVue).\n>>>>>>> theirs\n",
+                "<<<<<<< ours\n=======\nunknown\n>>>>>>> theirs\n",
             )
         with self.assertRaises(ValueError):
             resolve_text(
