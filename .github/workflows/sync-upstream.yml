@@ -66,6 +66,8 @@ jobs:
           RESOLVER="$RUNNER_TEMP/resolve_upstream_conflicts.py"
           cp scripts/resolve_upstream_conflicts.py "$RESOLVER"
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_resolve_upstream_conflicts.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_check_deleted_paths.py
+          BASE=$(git rev-parse HEAD)
 
           resolve_known_conflicts() {
             python3 "$RESOLVER"
@@ -92,6 +94,9 @@ jobs:
             echo "::error::Rebase left conflict markers in the tree"
             exit 1
           fi
+          # A file upstream deleted can still be referenced by a fork-only file
+          # that merged cleanly, so no conflict is ever reported. Fail here.
+          python3 scripts/check_deleted_paths.py --base "$BASE"
           git diff --check
 
       - name: Push rebased main
