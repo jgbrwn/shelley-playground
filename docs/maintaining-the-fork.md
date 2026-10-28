@@ -106,8 +106,8 @@ Current reviewed policies:
   `scripts/with-node` step and deleted `ui/.nvmrc`. Adopt upstream's step and
   re-apply the fork's release-skip condition in `release.yml`; anything other
   than that exact step aborts. `sync-upstream.yml` is fork-only, so it merges
-  clean and is **not** covered by this rule — check it by hand after an
-  upstream toolchain change.
+  clean, so the resolver never sees it. `scripts/check_deleted_paths.py`
+  covers that gap (see below).
 - **Release workflow:** preserve the upstream pnpm action upgrade together
   with the fork's unchanged release-skip guard. Other commands, repositories,
   and conditions are not version-only changes.
@@ -119,6 +119,35 @@ Current reviewed policies:
 - **Dependencies:** validate checksum lines and reject conflicting hashes for
   the same module/version, then union and `go mod tidy`. GoReleaser also runs
   tidy, so verify that its hook will not dirty the committed tree.
+
+### A clean merge is not a correct merge
+
+A rebase reports conflicts only where both sides touched the same lines. If
+upstream **deletes** a file and a fork-only file still refers to it, nothing
+conflicts: the fork-only file is not part of the merge, so git reports success
+while the tree is broken. Upstream deleted `ui/.nvmrc` on 2026-10-28;
+`release.yml` and `test.yml` conflicted and were handled, but the fork-only
+`sync-upstream.yml` merged cleanly and kept reading `.nvmrc`.
+
+`scripts/check_deleted_paths.py` closes that gap. It diffs the pre-rebase
+revision against HEAD, takes the deleted paths, and fails if any *functional*
+file — workflows, `Makefile`, `scripts/*`, `.goreleaser.yml`, `ui/package.json`,
+`go.mod` — still refers to one. The sync runs it after resolving and before
+pushing; `Test` runs it with the resolver tests.
+
+Deliberate deletions are exempt because the checker reads the resolver's
+`DELETED_PATHS`, so intent lives in one place. Prose mentions and undefined
+output paths (`bin/shelley-*`, artifact directories) are ignored on purpose:
+they cannot break a build, and flagging them would train people to bypass the
+check. The files that exist to *describe* deletions are exempt for the same
+reason.
+
+```bash
+python3 scripts/check_deleted_paths.py --base <pre-rebase-revision>
+```
+
+If it fails after an upstream change, the fix is to update the reference, not
+to silence the check.
 
 ## Verify before pushing
 
