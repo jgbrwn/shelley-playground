@@ -94,6 +94,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_resolve_upstream_conflicts.py
 
 Current reviewed policies:
 
+Rules that read Git stage 1 (server.go, README.md, go.mod) need `main()` to
+load the base for *that path*. Forgetting one turns every fork line into an
+unknown addition and the sync aborts on a shape it was taught to handle. The
+git-level tests exercise `main()` end-to-end, so they catch that wiring bug;
+string fixtures alone cannot.
+
 - **Server imports/initialization:** keep upstream and the deploy commit's
   known additions. Inherited lines are identified from Git stage 1, not guessed
   from a field name. This prevents resurrecting imports upstream removed. An
@@ -116,9 +122,15 @@ Current reviewed policies:
 - **Deleted publisher:** `.github/workflows/publish-version-metadata.yml` is
   intentionally removed (no fork Pages publisher). Only the expected upstream
   modify/fork-delete index stages may be resolved by deleting it.
-- **Dependencies:** validate checksum lines and reject conflicting hashes for
-  the same module/version, then union and `go mod tidy`. GoReleaser also runs
-  tidy, so verify that its hook will not dirty the committed tree.
+- **Dependencies:** upstream owns every dependency version. In `go.mod`, a
+  fork line that repeats the stage-1 pin is a stale echo of an old upstream
+  version and upstream's line wins; `github.com/mikesmitty/edkey` is the only
+  reviewed fork requirement, kept when it is absent from stage 1. A fork line
+  that *changed* a version from stage 1 is a fork-authored pin, which the fork
+  does not own, so that aborts. In `go.sum`, validate checksum lines and
+  reject conflicting hashes for the same module/version, then union and
+  `go mod tidy`. GoReleaser also runs tidy, so verify that its hook will not
+  dirty the committed tree.
 
 ### A clean merge is not a correct merge
 
