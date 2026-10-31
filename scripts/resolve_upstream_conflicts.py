@@ -15,6 +15,7 @@ DELETED_PATHS = {
 
 KNOWN_PATHS = {
     "README.md",
+    "go.mod",
     "go.sum",
     "server/server.go",
     "ui/src/vue/App.vue",
@@ -86,6 +87,65 @@ def resolve_go_sum_hunk(ours: list[str], theirs: list[str]) -> list[str]:
             raise ValueError(f"conflicting go.sum hashes for {module} {version}")
         hashes[key] = digest
     return sorted(set(content))
+
+
+MODULE_RE = re.compile(r"^[ \t]*(?P<mod>[^/\s][^\s]*) v(?P<ver>\S+)(?P<indirect> // indirect)?[ \t]*$")
+
+
+def resolve_go_mod_hunk(
+    ours: list[str], theirs: list[str], base_text: str
+) -> list[str]:
+    """Upstream owns dependency versions; the fork adds only edkey.
+
+    A go.mod conflict is upstream bumping a module while the replayed deploy
+    commit still carries the old pin. Upstream's line wins: the fork owns no
+    dependency versions. A requirement the fork adds is only kept when it is
+    absent from stage 1, the commit's original base -- which proves it is a
+    real fork addition rather than a stale echo of an upstream pin.
+    `go mod tidy` runs afterwards and is authoritative.
+    """
+    upstream = [line for line in ours if line.strip()]
+    fork = [line for line in theirs if line.strip()]
+    if not upstream or not fork:
+        raise ValueError("go.mod conflict is not a require-block addition")
+
+    for line in upstream + fork:
+        if not MODULE_RE.match(line):
+            raise ValueError(f"unexpected go.mod conflict line: {line.strip()!r}")
+
+    # A fork line is a stale echo only when its module AND version are exactly
+    # what the base already had -- the replayed commit simply carried an old
+    # pin. If the fork changed a version from base, that is a real fork-authored
+    # change to a dependency version, which upstream owns; stop for a human.
+    base_by_module = {}
+    for line in base_text.splitlines():
+        match = MODULE_RE.match(line)
+        if match:
+            base_by_module[match.group("mod")] = line.strip()
+
+    upstream_modules = {MODULE_RE.match(line)["mod"] for line in upstream}
+    additions = []
+    for line in fork:
+        match = MODULE_RE.match(line)
+        module = match.group("mod")
+        if base_by_module.get(module) == line.strip():
+            continue  # stale echo of an upstream pin; upstream's line wins
+        if module in base_by_module:
+            raise ValueError(
+                f"go.mod conflicts on the version of {module}, "
+                "which the fork does not own"
+            )
+        additions.append(line)
+
+    # edkey is the sole reviewed fork addition.
+    if any(MODULE_RE.match(line)["mod"] != "github.com/mikesmitty/edkey" for line in additions):
+        raise ValueError("unreviewed dependency addition in go.mod")
+
+    kept = list(upstream)
+    for line in additions:
+        if MODULE_RE.match(line)["mod"] not in upstream_modules:
+            kept.append(line)
+    return kept
 
 
 def resolve_app_hunk(
@@ -506,6 +566,8 @@ def resolve_text(name: str, text: str, base_text: str = "") -> str:
             replacement, consumed = resolve_readme_hunk(ours, theirs, base_text), 0
         elif name == "go.sum":
             replacement, consumed = resolve_go_sum_hunk(ours, theirs), 0
+        elif name == "go.mod":
+            replacement, consumed = resolve_go_mod_hunk(ours, theirs, base_text), 0
         elif name == "ui/src/vue/App.vue":
             replacement, consumed = resolve_app_hunk(lines, ours, theirs, after)
         elif name == "ui/src/vue/components/ChatInterface.vue":
@@ -528,7 +590,7 @@ def resolve_text(name: str, text: str, base_text: str = "") -> str:
         else:
             raise ValueError(f"unsupported conflict path: {name}")
 
-        if name in ("server/server.go", "go.sum"):
+        if name in ("server/server.go", "go.mod", "go.sum"):
             for line in replacement:
                 if line not in merged:
                     merged.append(line)
@@ -574,7 +636,7 @@ def main() -> None:
             continue
         try:
             base_text = ""
-            if name in ("server/server.go", "README.md"):
+            if name in ("server/server.go", "README.md", "go.mod"):
                 base_text = subprocess.check_output(
                     ["git", "show", f":1:{name}"], text=True
                 )

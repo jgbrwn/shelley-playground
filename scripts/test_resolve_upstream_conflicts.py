@@ -440,6 +440,44 @@ func initServer(s *Server) {
         self.assertNotIn("Compact view/theme/notification controls", resolved)
         self.assertEqual(resolved.count('<div class="overflow-menu-divider" />'), 2)
 
+    def test_go_mod_keeps_upstream_versions_and_fork_edkey(self):
+        # Today's real hunk: upstream bumped compress while the replayed
+        # deploy commit carried the old pin plus its own edkey requirement.
+        T = "\t"
+        base = T + "github.com/klauspost/compress v1.20.0\n" + T + "github.com/modelcontextprotocol/go-sdk v1.8.0\n"
+        ours = T + "github.com/klauspost/compress v1.20.3\n"
+        theirs = T + "github.com/klauspost/compress v1.20.0\n" + T + "github.com/mikesmitty/edkey v0.0.0-20170222072505-3356ea4e686a\n"
+        gomod = "<<<<<<< HEAD\n" + ours + "=======\n" + theirs + ">>>>>>> deploy\n"
+        resolved = resolve_text("go.mod", gomod, base)
+        self.assertNotIn("<<<<<<<", resolved)
+        self.assertIn("github.com/klauspost/compress v1.20.3", resolved)
+        self.assertNotIn("v1.20.0", resolved)
+        self.assertIn("github.com/mikesmitty/edkey", resolved)
+
+    def test_go_mod_rejects_unreviewed_or_non_addition_lines(self):
+        T = "\t"
+        base = T + "github.com/klauspost/compress v1.20.0\n"
+        cases = [
+            (
+                T + "github.com/klauspost/compress v1.20.3\n",
+                T + "github.com/klauspost/compress v1.20.0\n" + T + "github.com/other/thing v1.0.0\n",
+                "a module absent from base but not edkey is unreviewed",
+            ),
+            (
+                T + "github.com/klauspost/compress v1.20.3\n",
+                T + "github.com/klauspost/compress v1.20.0\n" + "go 1.27.3\n",
+                "non-require lines are unexpected",
+            ),
+            (
+                T + "github.com/klauspost/compress v1.20.3\n",
+                T + "github.com/klauspost/compress v1.20.2\n" + T + "github.com/mikesmitty/edkey v0.0.0-20170222072505-3356ea4e686a\n",
+                "both sides changing the same pin is not an addition",
+            ),
+        ]
+        for ours, theirs, note in cases:
+            with self.subTest(note=note), self.assertRaises(ValueError):
+                resolve_text("go.mod", f"<<<<<<< HEAD\n{ours}=======\n{theirs}\n>>>>>>> deploy\n", base)
+
     def test_go_sum_takes_the_union_of_dependency_lines(self):
         # Upstream pulled in MCP/OAuth deps; our deploy SSH-key code pulled in
         # edkey. Both sides only add lines, and go.sum must carry both.
@@ -640,6 +678,62 @@ class GitConflictResolverTest(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("expected upstream modify/fork delete", result.stderr)
                     self.assertEqual(path.read_text(), "publisher\n")
+
+    def test_go_mod_rebase_keeps_edkey_and_upstream_pin(self):
+        # main() must read Git stage 1 for go.mod, exactly as for server.go.
+        # Without it every fork line looks like an unreviewed addition and
+        # the sync aborts on the shape it was taught to handle.
+        resolver = Path(__file__).with_name("resolve_upstream_conflicts.py").resolve()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def git(*args, check=True):
+                return subprocess.run(
+                    ["git", *args], cwd=root, text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check,
+                )
+
+            git("init", "-q", "-b", "base")
+            git("config", "user.name", "Resolver test")
+            git("config", "user.email", "resolver@example.test")
+            (root / "scripts").mkdir()
+            (root / "scripts" / "resolve_upstream_conflicts.py").write_text(resolver.read_text())
+            go = root / "go.mod"
+            go.write_text(
+                "module example.test/m\n\n"
+                "require (\n"
+                "\tgithub.com/klauspost/compress v1.20.0\n"
+                ")\n"
+            )
+            git("add", ".")
+            git("commit", "-m", "base")
+            git("checkout", "-b", "fork")
+            go.write_text(
+                "module example.test/m\n\n"
+                "require (\n"
+                "\tgithub.com/klauspost/compress v1.20.0\n"
+                "\tgithub.com/mikesmitty/edkey v0.0.0-20170222072505-3356ea4e686a\n"
+                ")\n"
+            )
+            git("commit", "-am", "add edkey")
+            git("checkout", "-b", "upstream", "base")
+            go.write_text(
+                "module example.test/m\n\n"
+                "require (\n"
+                "\tgithub.com/klauspost/compress v1.20.3\n"
+                ")\n"
+            )
+            git("commit", "-am", "bump compress")
+            git("checkout", "fork")
+            result = git("rebase", "upstream", check=False)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            subprocess.run([sys.executable, str(resolver)], cwd=root, check=True)
+            self.assertEqual(git("diff", "--name-only", "--diff-filter=U").stdout, "")
+            staged = git("show", ":go.mod").stdout
+            self.assertIn("compress v1.20.3", staged)
+            self.assertNotIn("v1.20.0", staged)
+            self.assertIn("github.com/mikesmitty/edkey", staged)
+            git("-c", "core.editor=true", "rebase", "--continue")
 
     def test_server_import_rebase(self):
         resolver = Path(__file__).with_name("resolve_upstream_conflicts.py").resolve()
