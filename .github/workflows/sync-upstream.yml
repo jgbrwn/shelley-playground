@@ -99,6 +99,27 @@ jobs:
           python3 scripts/check_deleted_paths.py --base "$BASE"
           git diff --check
 
+      - name: Verify the rebased tree compiles
+        if: steps.check.outputs.rebased == 'true'
+        run: |
+          set -euo pipefail
+          # A rebase can succeed while upstream removed a method a fork-only
+          # file still calls: no lines conflict and no file is deleted, so the
+          # checks above stay silent. On 2026-11-04 through 06 the sync rebased
+          # cleanly over a db.Tx whose Exec method upstream had deleted, and
+          # server/deploy_handlers.go stopped compiling. Compiling here fails
+          # the sync instead of shipping a broken main that only Test catches.
+          dirs="$(scripts/with-node)"
+          echo "${dirs//:/$'\n'}" >> "$GITHUB_PATH"
+          (cd ui && pnpm install --frozen-lockfile && pnpm run build)
+          for dir in templates/*/; do
+            name=$(basename "$dir")
+            tar -czf "templates/$name.tar.gz" -C "templates/$name" --exclude='.DS_Store' .
+          done
+          make exe-scroll-all
+          go build ./...
+          go vet ./...
+
       - name: Push rebased main
         if: steps.check.outputs.rebased == 'true'
         run: |
