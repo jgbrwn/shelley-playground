@@ -24,6 +24,14 @@ func newExecClient(token string) *execClient {
 
 var endpoint = "https://exe.dev/exec"
 
+// SetExecEndpointForTest overrides the exe.dev API endpoint so tests can run a
+// pipeline against a stub server. It returns the previous value to restore.
+func SetExecEndpointForTest(url string) string {
+	previous := endpoint
+	endpoint = url
+	return previous
+}
+
 // exec runs one CLI command via the HTTPS API and returns stdout. The API
 // accepts exactly one command line in the request body; unlike SSH, it has no
 // stdin stream.
