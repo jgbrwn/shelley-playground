@@ -161,6 +161,37 @@ python3 scripts/check_deleted_paths.py --base <pre-rebase-revision>
 If it fails after an upstream change, the fix is to update the reference, not
 to silence the check.
 
+## A green sync can still ship a broken tree
+
+Two failure classes merge **cleanly** — no conflict, no deleted file — so the
+conflict resolver and the deleted-path checker both stay silent:
+
+1. **Upstream deletes a file a fork-only file references.** Covered by
+   `scripts/check_deleted_paths.py` (see above).
+2. **Upstream removes a method/type/field that fork code calls.** On 2026-11-04
+   through 06 upstream's `move remaining raw SQL to sqlc` removed
+   `db.Tx.Exec`. The fork's `server/deploy_handlers.go` calls it, but no lines
+   conflicted and no file was deleted, so three nightly syncs rebased
+   *successfully* over a tree that no longer compiled. `Test` failed each
+   morning at `Build all release targets` with
+   `tx.Exec undefined (type *db.Tx has no field or method Exec)`. The fix was
+   one line — `tx.Conn().ExecContext(ctx, ...)` — since `Tx` now embeds `Rx`,
+   whose `Conn()` returns the underlying `*sql.Conn`.
+
+Neither class is detectable by reading conflicts. The only reliable catch is
+**compiling and vetting the rebased tree before pushing it**. The sync does
+that now (`go build ./...` and `go vet ./...` after the rebase, before the
+push), so a semantic break fails the sync instead of shipping a broken `main`
+that only `Test` would catch later.
+
+So the triage order for a red morning is:
+
+- Sync green but **Test red at a build step** → a semantic break like this,
+  not a flaky test and not a merge conflict. Read the compiler error, find the
+  upstream commit that removed the symbol (`git log -S'symbol' -- path`), and
+  update the fork's call site.
+- Sync **red** → a conflict the resolver refused; read `git diff --cc`.
+
 ## Verify before pushing
 
 Save a backup ref before rewriting history. Rehearse in a uniquely named
