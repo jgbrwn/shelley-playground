@@ -157,7 +157,7 @@ func (s *Server) persistRun(run *deploy.Run) {
 
 	eventsJSON, _ := json.Marshal(run.SnapshotEvents())
 	err := s.db.Pool().Tx(ctx, func(ctx context.Context, tx *db.Tx) error {
-		_, err := tx.Exec(`INSERT INTO deploy_runs (vm_name, image, project_dir, status, error, events, finished_at)
+		_, err := tx.Conn().ExecContext(ctx, `INSERT INTO deploy_runs (vm_name, image, project_dir, status, error, events, finished_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			run.VMName, run.Image, run.ProjectDir, run.Status(), run.ErrMsg(), string(eventsJSON), run.FinishedAt())
 		return err
