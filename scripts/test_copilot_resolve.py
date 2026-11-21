@@ -19,6 +19,7 @@ args = sys.argv[1:]
 assert "shell" in args and "url" in args and "--max-ai-credits" in args, args
 files = [a[6:-1] for a in args if a.startswith("write(")]
 mode = os.environ["STUB_MODE"]
+open(args[args.index("--usage-output-file") + 1], "w").write('{"aiCredits": 2}')
 if mode == "fail":
     sys.exit("quota exhausted")
 for f in files if mode != "decline" else []:
@@ -77,6 +78,7 @@ class CopilotResolveTest(unittest.TestCase):
         report = (out / "ai-resolution.md").read_text()
         self.assertIn("fork change", report)
         self.assertIn("kept upstream", report)
+        self.assertIn('"aiCredits": 2', report)
 
     def test_rejects_bad_or_missing_resolutions(self):
         for mode, reason in (
