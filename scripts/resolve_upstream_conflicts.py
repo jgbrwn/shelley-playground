@@ -411,62 +411,73 @@ def resolve_text(name: str, text: str, base_text: str = "") -> str:
     return result
 
 
+def resolve_path(name: str) -> None:
+    """Resolve and stage one conflicted path, or raise ValueError."""
+    path = Path(name)
+    if name in DELETED_PATHS:
+        stages = {
+            line.split()[2]
+            for line in subprocess.check_output(
+                ["git", "ls-files", "--unmerged", "--", name], text=True
+            ).splitlines()
+        }
+        if stages != {"1", "2"}:
+            raise ValueError("expected upstream modify/fork delete")
+        if path.exists():
+            path.unlink()
+        subprocess.run(["git", "rm", "--quiet", "--", name], check=True)
+        return
+    if name not in OWNED_PATHS:
+        try:
+            merged = resolve_additive(diff3_merge(name))
+        except NotAdditive as error:
+            if name not in KNOWN_PATHS:
+                raise ValueError(f"{error}; no reviewed rule applies") from error
+        else:
+            path.write_text(merged)
+            # gofmt sorts imports both sides added, and refuses a composition
+            # that does not parse.
+            if name.endswith(".go") and subprocess.run(["gofmt", "-w", name]).returncode:
+                raise ValueError("the composed file is not valid Go")
+            print(f"{name}: composed independent changes")
+            subprocess.run(["git", "add", "--", name], check=True)
+            return
+    base_text = ""
+    if name in ("README.md", "go.mod"):
+        base_text = subprocess.check_output(["git", "show", f":1:{name}"], text=True)
+    path.write_text(resolve_text(name, path.read_text(), base_text))
+    subprocess.run(["git", "add", "--", name], check=True)
+
+
 def main() -> None:
+    """Resolve every conflicted path; leave only the refused ones unmerged.
+
+    Refused paths are restored as diff3 conflicts (base included) for the
+    next resolver, a person or the Copilot step, and the exit status is 1.
+    """
     conflicts = subprocess.check_output(
         ["git", "diff", "--name-only", "--diff-filter=U"], text=True
     ).splitlines()
     if not conflicts:
         raise SystemExit("rebase stopped without a conflicted path")
 
+    refused = []
     for name in conflicts:
-        path = Path(name)
-        if name not in OWNED_PATHS and name not in DELETED_PATHS:
-            try:
-                path.write_text(resolve_additive(diff3_merge(name)))
-                if name.endswith(".go"):
-                    # Sorts imports both sides added, and refuses a
-                    # composition that does not parse.
-                    if subprocess.run(["gofmt", "-w", name]).returncode:
-                        raise ValueError("the composed file is not valid Go")
-                print(f"{name}: composed independent changes")
-                subprocess.run(["git", "add", "--", name], check=True)
-                continue
-            except NotAdditive as error:
-                if name not in KNOWN_PATHS:
-                    raise SystemExit(f"{name}: {error}; no reviewed rule applies") from error
-            except ValueError as error:
-                raise SystemExit(f"{name}: {error}") from error
-        if name in DELETED_PATHS:
-            stages = {
-                line.split()[2]
-                for line in subprocess.check_output(
-                    ["git", "ls-files", "--unmerged", "--", name], text=True
-                ).splitlines()
-            }
-            if stages != {"1", "2"}:
-                raise SystemExit(f"{name}: expected upstream modify/fork delete")
-            if path.exists():
-                path.unlink()
-            subprocess.run(["git", "rm", "--quiet", "--", name], check=True)
-            continue
         try:
-            base_text = ""
-            if name in ("README.md", "go.mod"):
-                base_text = subprocess.check_output(
-                    ["git", "show", f":1:{name}"], text=True
-                )
-            path.write_text(resolve_text(name, path.read_text(), base_text))
+            resolve_path(name)
         except ValueError as error:
-            raise SystemExit(f"{name}: {error}") from error
-        subprocess.run(["git", "add", "--", name], check=True)
+            refused.append(f"{name}: {error}")
+            subprocess.run(["git", "checkout", "--conflict=diff3", "--", name], capture_output=True)
 
-    if "go.sum" in conflicts:
+    if "go.sum" in conflicts and not any(r.startswith(("go.sum:", "go.mod:")) for r in refused):
         # GoReleaser runs `go mod tidy` as a before-hook and fails if it
         # rewrites the tree, so a hand-merged dependency graph must be tidied
         # here. tidy also sorts go.sum and moves direct dependencies out of
         # the indirect block, which the union above does not do.
         subprocess.run(["go", "mod", "tidy"], check=True)
         subprocess.run(["git", "add", "--", "go.mod", "go.sum"], check=True)
+    if refused:
+        raise SystemExit("\n".join(refused))
 
 
 if __name__ == "__main__":
