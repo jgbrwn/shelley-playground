@@ -2,9 +2,9 @@
 """Replay every historical upstream sync with a resolver; compare to what shipped.
 
 For each pair of consecutive playground releases A, B whose upstream bases
-differ, rebase A onto B's upstream base, resolving conflicts with RESOLVER
-exactly as the sync does, and report whether the rebase was clean, resolved
-automatically, or refused. An automatic result is compared with B's tree,
+differ, rebase A onto B's upstream base with scripts/sync_rebase.sh, exactly
+as the sync does but without Copilot, resolving conflicts with RESOLVER. It
+reports whether each rebase was clean, resolved automatically, or refused. An automatic result is compared with B's tree,
 ignoring files that fork commits new in B touched, since those were edited by
 hand. Run it before changing the resolver: a change should only turn refusals
 into results that match what shipped.
@@ -37,9 +37,12 @@ def main() -> None:
     upstream = sys.argv[1]
     root = Path(git("rev-parse", "--show-toplevel").strip())
     work = Path(tempfile.mkdtemp(prefix="replay-sync-"))
-    # The resolver must live outside the worktree: rebasing replaces scripts/.
-    resolver = work / "resolver.py"
-    shutil.copy(sys.argv[2] if len(sys.argv) == 3 else root / "scripts/resolve_upstream_conflicts.py", resolver)
+    # Run copies from outside the worktree, as the sync does: rebasing
+    # replaces scripts/. The resolver under test may come from elsewhere.
+    for name in ("sync_rebase.sh", "copilot_resolve.py"):
+        shutil.copy(root / "scripts" / name, work / name)
+    shutil.copy(sys.argv[2] if len(sys.argv) == 3 else root / "scripts/resolve_upstream_conflicts.py",
+                work / "resolve_upstream_conflicts.py")
     tags = json.loads(subprocess.check_output(
         ["gh", "release", "list", "--repo", REPO, "--limit", "1000", "--json", "tagName,createdAt"], text=True
     ))
@@ -61,18 +64,19 @@ def main() -> None:
                 continue
             git("checkout", "-q", "-f", "--detach", a, cwd=tree)
             git("clean", "-qfdx", cwd=tree)
-            status, note = "clean", ""
-            step = subprocess.run(["git", "rebase", base_b], cwd=tree, env=env, capture_output=True, text=True)
-            while step.returncode:
-                if not git("diff", "--name-only", "--diff-filter=U", cwd=tree).strip():
-                    status, note = "error", step.stderr.strip()[-200:]
-                    break
-                resolved = subprocess.run([sys.executable, resolver], cwd=tree, env=env, capture_output=True, text=True)
-                if resolved.returncode:
-                    status, note = "refused", (resolved.stderr.strip().splitlines() or ["?"])[-1]
-                    break
-                status = "auto"
-                step = subprocess.run(["git", "rebase", "--continue"], cwd=tree, env=env, capture_output=True, text=True)
+            out = work / "out"
+            shutil.rmtree(out, ignore_errors=True)
+            # No COPILOT_GITHUB_TOKEN: replay what the deterministic resolver does.
+            step = subprocess.run([str(work / "sync_rebase.sh"), base_b, str(out)], cwd=tree,
+                                  env={k: v for k, v in env.items() if k != "COPILOT_GITHUB_TOKEN"},
+                                  capture_output=True, text=True)
+            note = ""
+            if step.returncode:
+                status = "refused"
+                report = out / "refused.txt"
+                note = report.read_text().strip().splitlines()[0] if report.exists() else step.stderr.strip()[-200:]
+            else:
+                status = "auto" if (out / "stops.txt").exists() else "clean"
             if status in ("clean", "auto"):
                 new = set(git("log", "--format=%s", f"{base_b}..{b}").splitlines()) - set(
                     git("log", "--format=%s", f"{base_a}..{a}").splitlines())
@@ -84,7 +88,6 @@ def main() -> None:
                 differs = [f for f in git("diff", "--name-only", "HEAD", b, cwd=tree).split() if f not in hand_edited]
                 if differs:
                     note = f"differs from {tag_b}: {' '.join(differs)}"
-            git("rebase", "--abort", cwd=tree, check=False)
             counts[status] = counts.get(status, 0) + 1
             if note:
                 print(f"{tag_a} -> {tag_b} [{status}] {note}", flush=True)

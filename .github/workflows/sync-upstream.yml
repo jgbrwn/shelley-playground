@@ -9,6 +9,11 @@ name: Sync upstream & release
 # and then Release as for any push. If upstream hasn't moved, release this
 # commit only when its version tag does not exist.
 #
+# Conflicts the deterministic resolver refuses (both sides edited the same
+# lines) go to Copilot CLI when the COPILOT_GITHUB_TOKEN secret is set. Its
+# resolution must pass the same Test gate; each one is published as a
+# "sync-ai-resolved" issue for review after the fact.
+#
 # Any failure opens (or comments on) one "sync-failure" issue, which the next
 # successful sync closes, so a stuck sync is never silent.
 
@@ -28,6 +33,8 @@ concurrency:
 jobs:
   rebase:
     runs-on: ubuntu-latest
+    env:
+      HAS_COPILOT: ${{ secrets.COPILOT_GITHUB_TOKEN != '' }}
     outputs:
       rebased: ${{ steps.check.outputs.rebased }}
       main: ${{ steps.check.outputs.main }}
@@ -37,12 +44,22 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.PLAYGROUND_SYNC_TOKEN }}
+          # Copilot may run in this checkout: keep every credential out of
+          # it. Only the push step below sees the push token.
+          persist-credentials: false
 
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install Copilot CLI
+        if: env.HAS_COPILOT == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - if: env.HAS_COPILOT == 'true'
+        run: npm install --global @github/copilot@1.0.114
 
       - name: Add upstream remote
         run: |
@@ -72,42 +89,20 @@ jobs:
       - name: Rebase onto upstream/main
         id: rebase
         if: steps.check.outputs.rebased == 'true'
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          RESOLVER="$RUNNER_TEMP/resolve_upstream_conflicts.py"
-          REPORT="$RUNNER_TEMP/sync-report.md"
-          cp scripts/resolve_upstream_conflicts.py "$RESOLVER"
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_resolve_upstream_conflicts.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_check_deleted_paths.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_copilot_resolve.py
           BASE=$(git rev-parse HEAD)
-
-          if ! GIT_EDITOR=true git rebase upstream/main; then
-            while true; do
-              if ! python3 "$RESOLVER" 2> "$RUNNER_TEMP/resolver.err"; then
-                cat "$RUNNER_TEMP/resolver.err" >&2
-                {
-                  echo "The resolver refused a conflict while replaying \`$(git log -1 --format='%h %s' REBASE_HEAD)\`:"
-                  echo
-                  echo '```'
-                  cat "$RUNNER_TEMP/resolver.err"
-                  echo '```'
-                  echo
-                  echo '<details><summary><code>git diff --cc</code></summary>'
-                  echo
-                  echo '```diff'
-                  git diff --cc | head -c 40000
-                  echo '```'
-                  echo '</details>'
-                } > "$REPORT"
-                git rebase --abort
-                exit 1
-              fi
-              if GIT_EDITOR=true git rebase --continue; then
-                break
-              fi
-            done
-          fi
+          # Rebasing rewrites scripts/, so run copies from outside the tree.
+          TOOLS="$RUNNER_TEMP/sync-tools"
+          mkdir -p "$TOOLS"
+          cp scripts/sync_rebase.sh scripts/resolve_upstream_conflicts.py scripts/copilot_resolve.py "$TOOLS"
+          "$TOOLS/sync_rebase.sh" upstream/main "$RUNNER_TEMP/sync"
 
           if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- .; then
             echo "::error::Rebase left conflict markers in the tree"
@@ -121,18 +116,21 @@ jobs:
       - name: Push the rebased candidate
         id: candidate
         if: steps.check.outputs.rebased == 'true'
+        env:
+          SYNC_TOKEN: ${{ secrets.PLAYGROUND_SYNC_TOKEN }}
         run: |
           # The sync token has the Workflows permission required when upstream
           # commits change .github/workflows files.
-          git push --force origin HEAD:refs/heads/sync-candidate
+          git push --force "https://x-access-token:$SYNC_TOKEN@github.com/$GITHUB_REPOSITORY.git" \
+            HEAD:refs/heads/sync-candidate
           echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Upload failure report
-        if: failure()
+      - name: Upload sync reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sync-report
-          path: ${{ runner.temp }}/sync-report.md
+          path: ${{ runner.temp }}/sync/*.md
           if-no-files-found: ignore
 
   # Compiling alone is not enough: an automatic resolution must pass exactly
@@ -260,8 +258,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
-      - name: Download failure report
-        if: needs.rebase.result == 'failure'
+      - name: Download sync reports
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
@@ -290,12 +287,33 @@ jobs:
             if [ -n "$issue" ]; then
               gh issue close "$issue" --comment "Resolved: the sync succeeded in $RUN_URL."
             fi
+            if [ -f ai-resolution.md ]; then
+              gh label create sync-ai-resolved --color 5319E7 \
+                --description "Copilot resolved a sync conflict; review after the fact" 2>/dev/null || true
+              {
+                echo "Copilot resolved conflicts the deterministic resolver refused, and the"
+                echo "result passed the full Test workflow before it was promoted to main: $RUN_URL"
+                echo
+                echo "Review the decisions below. To undo one, fix it on main (or revert the"
+                echo "release); the next sync keeps whatever main has."
+                echo
+                cat ai-resolution.md
+              } > body.md
+              gh issue create --title "Copilot resolved a sync conflict ($(date -u +%F))" \
+                --label sync-ai-resolved --body-file body.md
+            fi
             exit 0
           fi
           {
             echo "The upstream sync failed while **$stage** on $(date -u +%F): $RUN_URL"
             echo
             if [ -f sync-report.md ]; then cat sync-report.md; fi
+            if [ -f ai-resolution.md ]; then
+              echo
+              echo "Copilot resolved some conflicts before the failure:"
+              echo
+              cat ai-resolution.md
+            fi
             echo
             echo 'See docs/maintaining-the-fork.md for triage.'
           } > body.md
