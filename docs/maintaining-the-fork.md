@@ -1,196 +1,191 @@
 # Maintaining the Shelley Playground fork
 
-This fork keeps the deploy-to-exe.dev feature while rebasing onto
-`boldsoftware/shelley` main. Treat upstream changes as new code to review, not
-as obstacles to silence. Unknown conflicts must stop unattended automation.
+This fork keeps the deploy-to-exe.dev feature while rebasing nightly onto
+`boldsoftware/shelley` main. The goal is that the sync needs **no human or AI
+intervention** for ordinary upstream churn, and that whatever does need one
+can never reach `main` and is never silent.
+
+## How the nightly sync works
+
+`.github/workflows/sync-upstream.yml`, daily at 03:00 UTC and on demand:
+
+1. **Rebase** the fork's commits onto upstream main. Each conflict goes to
+   `scripts/resolve_upstream_conflicts.py`, which composes it or refuses
+   (see [the resolver](#the-resolver-compose-or-refuse)).
+2. **Check** that no fork-only file still references a path upstream deleted
+   (`scripts/check_deleted_paths.py`; see below).
+3. **Push the candidate** to the `sync-candidate` branch, and run the full
+   `Test` workflow on it: the Go and UI test suites, all four release builds,
+   TypeScript and Vue type-checks, lint, `go vet`, and the resolver tests.
+4. **Promote** the candidate to `main` only if Test passed, with a lease on
+   the `main` the sync started from. The push runs Test and Release as usual.
+
+If upstream has not moved, the sync only releases when the current commit's
+version tag is missing.
+
+Any failed stage opens an issue labelled **`sync-failure`** (or comments on
+the open one) with the stage, the run link and, for a refused conflict, the
+resolver's reason and the `git diff --cc`. The next successful sync closes it.
+A failed candidate stays on `sync-candidate` for inspection, and `main` keeps
+the last good release. A failure is retried by the next night's run, which
+also picks up any fix pushed in between.
 
 ## Triage the actual failure first
 
-1. Fetch both remotes and identify the failed run's **exact head and upstream
-   target SHA**. Local `custom` may be older than `playground/main`; the nightly
-   bot can have pushed since your last session.
-2. Read the failing step and assertion, not just the workflow's red status:
+Start from the `sync-failure` issue: it names the stage that failed.
 
-   ```bash
-   git fetch origin main --tags
-   git fetch playground main
-   gh run list --repo jgbrwn/shelley-playground --limit 10
-   gh run view RUN_ID --repo jgbrwn/shelley-playground --log-failed
-   ```
+- **Rebasing** — the resolver refused an edit-vs-edit conflict. Read the
+  reason and the combined diff in the issue. Decide what the result should be,
+  then either rebase by hand or, if this file will keep conflicting the same
+  way, add a reviewed rule (see below).
+- **Testing the candidate** — the rebase succeeded but the tree is broken:
+  upstream removed or changed something fork code uses (a *semantic* break; on
+  2026-11-04 upstream deleted `db.Tx.Exec`, which deploy code called), or a
+  test is flaky. Check out `sync-candidate` and read the failing step's log.
+  For a removed symbol, `git log -S'symbol' upstream/main` finds the upstream
+  commit; fix the fork's call site.
+- **Promoting** — `main` moved while the candidate was tested, which is
+  expected after a manual push. The next run starts from the new `main`.
 
-3. Distinguish a rejected rebase from a build/toolchain error, failing test,
-   or release/token problem. Each needs a different fix. A red sync is **not**
-   automatically a reason to broaden the resolver.
-4. Reproduce a rebase using the failed run's head in a scratch worktree and
-   its upstream target SHA. Then test against the current upstream tip too.
-   During rebase, **ours/HEAD is upstream**, and **theirs is the fork commit
-   being replayed**. Stage 1 is that commit's original base.
+To reproduce, fetch both remotes and use the failed run's **exact** `main` and
+upstream SHAs in a scratch worktree; local `custom` may be older than
+`playground/main`. During a rebase **ours/HEAD is upstream** and **theirs is
+the fork commit being replayed**; stage 1 is that commit's original base.
 
-The sync is scheduled for 03:00 UTC; GitHub may start it later. It pushes with
-`PLAYGROUND_SYNC_TOKEN`, which must have permission to update workflow files.
-A successful rebased push triggers `Test`, then `Release`. A failed rebase
-aborts before pushing. If upstream is unchanged, sync only releases when the
-current commit's generated tag is absent.
+```bash
+git fetch origin main --tags
+git fetch playground main
+gh run view RUN_ID --repo jgbrwn/shelley-playground --log-failed
+```
 
-## Keep custom changes small, not forbidden
+The sync pushes with `PLAYGROUND_SYNC_TOKEN`, which must be allowed to update
+workflow files, because upstream commits can change `.github/workflows`.
 
-Prefer fork documentation in `docs/` and cohesive deploy code in
-`server/deploy/`. Upstream can add paths there too; these are not reserved
-namespaces. Editing upstream files is sometimes necessary and is allowed.
-Review and test those edits rather than avoiding a real fix to save a merge.
-Do not modify existing shared migrations; use new migrations and new tables.
+## Keep fork changes composable
 
-The fork owns **README.md** and replaces most of it. Do not put operational
-detail back into README; link to this guide.
+Upstream changes often, so assume every upstream line near a fork change will
+move. What decides whether the sync handles it alone is the *kind* of change
+the fork makes:
 
-Between October 12 and October 28 that ownership was modelled as a list of
-acceptable hunk *shapes*, and the nightly sync failed six times, each time
-because upstream's next prose edit made git align the same replacement
-differently:
+- **Adding lines** (a new prop, menu item, route, API method, import) always
+  composes with whatever upstream does around them, including when upstream
+  adds its own lines at the same spot. Prefer additions.
+- **Editing an upstream line** conflicts the moment upstream edits it too,
+  and needs a human. When the fork must change upstream behavior, prefer a
+  small inserted call (a hook) over rewriting upstream lines. The deploy
+  feature's settings redaction is the model: one inserted
+  `redactPrivateSettings(settings)` line survived upstream rewriting the
+  response encoding around it.
+- Put substantial fork code in fork-owned files (`server/deploy/`, `docs/`,
+  `ui/src/vue/components/Deploy*.vue`), so upstream lines near it are few.
+- Do not modify existing shared migrations; add new migrations and tables.
 
-| Date | Upstream change | New shape |
+The fork owns **README.md**: its version wins. If upstream adds a README
+section, the sync keeps going and logs an Actions warning naming the section,
+to port at leisure. Operational detail belongs here, not in README.
+
+## The resolver: compose or refuse
+
+`scripts/resolve_upstream_conflicts.py` re-merges each conflicted file with
+`git merge-file --diff3`, which shows, per hunk, the **base** lines and each
+side's whole change. Git's default conflict view hides the base and pulls
+shared lines out of the hunk, which is why the old resolver needed a
+hand-written rule per file and per shape.
+
+With the base visible, each side is either *inserting around* the base (base
+kept intact) or *editing* it:
+
+| Upstream | Fork | Result |
 |---|---|---|
-| Oct 12 | added a site link to the intro | intro replacement |
-| Oct 16 | added an idle-compaction paragraph | Architecture tail vs build block |
-| Oct 21 | reworded and deleted trailing blank | empty-ours tail replacement |
-| Oct 23 | added a heading inside the deleted tail | upstream tail vs one fork heading |
-| Oct 28 | moved build instructions to mise | build block vs replacement subsection |
+| inserted | inserted | upstream's lines, then the fork's |
+| edited | inserted | fork's insertions around upstream's edit |
+| inserted | edited | upstream's insertions around the fork's edit |
+| edited | edited | **refuse** |
 
-Enumerating alignments does not converge: every shape was correct, and each
-one was blind to the next. The rule now models the actual invariant — the fork
-owns the file — and guards the one thing ownership must not swallow: if
-upstream introduces a **heading its pre-rebase README lacked**, it has added a
-section the fork has never seen, and the sync aborts for a human.
+This is ordinary three-way merging at a finer grain; git only reported a
+conflict because the changes were adjacent. A side that contains the base more
+than once is ambiguous and also refused. Composed `.go` files go through
+`gofmt`, which sorts imports and refuses a result that does not parse. An
+upstream *deletion* is an edit of the base, so the resolver never resurrects
+code upstream removed while the fork's commit still had it as context.
 
-That inversion is the general lesson. When the same file keeps re-conflicting,
-stop adding rules for each alignment and ask which side owns the file and what
-must provably survive. A per-shape rule set looks safe because each rule is
-narrow, but it fails *at 03:00*, once per upstream prose edit, forever.
+What this cannot see is **meaning**: two compositions that are each fine can
+together be wrong. That is why the candidate must pass the whole Test workflow
+before it becomes `main`. Composition decides what is *mechanically* safe;
+the tests decide whether it is *correct*.
 
-## Resolver safety and tests
+Reviewed rules remain only where the generic merge would be wrong or has
+genuinely met edit-vs-edit conflicts:
 
-`scripts/resolve_upstream_conflicts.py` accepts reviewed conflict shapes only.
-Sync copies it outside the checkout before rebase (old commits would otherwise
-replace it), runs its tests, and logs `git diff --cc` before aborting when a
-shape is rejected. The ordinary Test workflow also runs the resolver tests.
+- **README.md, go.mod, go.sum** are ownership rules, applied instead of
+  composition. README: the fork's text wins (with the warning above), and the
+  result must keep the fork's title and the `shelley.dev` link. Dependencies:
+  upstream owns every version. In `go.mod` a fork line repeating the stage-1
+  pin is a stale echo and upstream's line wins; `github.com/mikesmitty/edkey`
+  is the only fork requirement; a fork line that *changed* a version aborts.
+  `go.sum` takes the union after rejecting conflicting hashes, then
+  `go mod tidy` runs, because GoReleaser's tidy hook fails on a dirty tree.
+- **`release.yml`** — adopt upstream's `scripts/with-node` setup step with the
+  fork's release-skip guard; preserve upstream action upgrades next to the
+  skip guard; keep omitting upstream's headless-shell release job.
+- **Deleted files** — `.github/workflows/publish-version-metadata.yml` is
+  deliberately removed; only the expected modify/delete stages are resolved
+  by deleting it.
 
-For each rule change:
-
-- Use the real hunk and inspect the upstream change and replayed fork patch.
-  A combined diff alone may omit important surrounding context.
-- State what each side owns. Do not assume different assignments are harmless,
-  or that a shared heading means all surrounding prose may be discarded.
-- Add the real positive fixture and nearby negative fixtures. Unknown commands,
-  competing values, or changed action repositories must still be rejected.
-- Exercise the CLI against Git index stages when the rule uses merge-base
-  information; string-only fixtures cannot verify that behavior.
-- Replay the complete commit series using a saved copy of the new resolver.
-  Inspect the result against upstream and the intended fork delta. A clean
-  merge or a marker-free file is not proof of correctness.
+Every other conflict composes or refuses. To add a rule, start from the real
+hunk; add the positive fixture and nearby negative ones; and if the rule reads
+git stages, add a git-level test that drives `main()`, because string
+fixtures cannot catch a missing stage read. Then replay history:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_resolve_upstream_conflicts.py
+git fetch playground --tags && git fetch origin main
+scripts/replay_sync_history.py origin/main
 ```
 
-Current reviewed policies:
+`replay_sync_history.py` re-runs every past sync between consecutive releases
+with the working resolver and compares each automatic result with what
+actually shipped. On 2026-11-21 it replayed 67 syncs: 50 clean, 15 composed,
+2 refused. Both refusals were genuine edit-vs-edit conflicts (a `test.yml`
+line both sides rewrote, and a README from before the fork's README carried
+the `shelley.dev` link). Three automatic results differed from what shipped,
+and all were benign: import order (since fixed with `gofmt`); a documentation
+line in `CommandPalette.vue` that the manual resolution had dropped; and an
+`edkey` line in `go.mod` that the shipped release had wrongly marked indirect.
+A resolver change should only turn refusals into results that match what
+shipped.
 
-Rules that read Git stage 1 (server.go, README.md, go.mod) need `main()` to
-load the base for *that path*. Forgetting one turns every fork line into an
-unknown addition and the sync aborts on a shape it was taught to handle. The
-git-level tests exercise `main()` end-to-end, so they catch that wiring bug;
-string fixtures alone cannot.
+### History: why per-shape rules did not converge
 
-- **Server imports/initialization:** keep upstream and the deploy commit's
-  known additions. Inherited lines are identified from Git stage 1, not guessed
-  from a field name. This prevents resurrecting imports upstream removed. An
-  unfamiliar fork addition or competing `s.deployManager` value aborts.
-- **README:** the fork's side wins wholesale, because the fork owns the file.
-  The resolver aborts if upstream's side introduces a heading absent from the
-  pre-rebase file (a new upstream section), and the merged result must still
-  contain the fork's title and the `shelley.dev` link.
-- **Node setup:** upstream replaced the two pinned setup actions with one
-  `scripts/with-node` step and deleted `ui/.nvmrc`. Adopt upstream's step and
-  re-apply the fork's release-skip condition in `release.yml`; anything other
-  than that exact step aborts. `sync-upstream.yml` is fork-only, so it merges
-  clean, so the resolver never sees it. `scripts/check_deleted_paths.py`
-  covers that gap (see below).
-- **Release workflow:** preserve the upstream pnpm action upgrade together
-  with the fork's unchanged release-skip guard. Other commands, repositories,
-  and conditions are not version-only changes.
-- **Headless-shell:** the fork intentionally omits upstream's separate Chromium
-  release job and downloads upstream assets instead.
-- **Deleted publisher:** `.github/workflows/publish-version-metadata.yml` is
-  intentionally removed (no fork Pages publisher). Only the expected upstream
-  modify/fork-delete index stages may be resolved by deleting it.
-- **Dependencies:** upstream owns every dependency version. In `go.mod`, a
-  fork line that repeats the stage-1 pin is a stale echo of an old upstream
-  version and upstream's line wins; `github.com/mikesmitty/edkey` is the only
-  reviewed fork requirement, kept when it is absent from stage 1. A fork line
-  that *changed* a version from stage 1 is a fork-authored pin, which the fork
-  does not own, so that aborts. In `go.sum`, validate checksum lines and
-  reject conflicting hashes for the same module/version, then union and
-  `go mod tidy`. GoReleaser also runs tidy, so verify that its hook will not
-  dirty the committed tree.
+From September to November the resolver accepted a growing list of reviewed
+hunk *shapes*: about a dozen rules across `App.vue`, `ChatInterface.vue`,
+`ChatOverflowMenu.vue`, `CommandPalette.vue`, `server.go`, README and the
+workflows. Each was correct and each was blind to the next upstream change:
+README alone failed six times in October, once per alignment. Then, from
+2026-11-07 to 11-21, the sync failed fifteen nights in a row because upstream
+appended APIs to the end of `ui/src/services/api.ts` exactly where the deploy
+commit appends its own, a file with no rule. Every one of those conflicts was
+two insertions at one anchor, or an insertion next to an edit. The replay
+showed composition covers all of the UI and server rules with identical
+results, so they were deleted.
 
 ### A clean merge is not a correct merge
 
-A rebase reports conflicts only where both sides touched the same lines. If
-upstream **deletes** a file and a fork-only file still refers to it, nothing
-conflicts: the fork-only file is not part of the merge, so git reports success
-while the tree is broken. Upstream deleted `ui/.nvmrc` on 2026-10-28;
-`release.yml` and `test.yml` conflicted and were handled, but the fork-only
-`sync-upstream.yml` merged cleanly and kept reading `.nvmrc`.
+Git reports conflicts only where both sides touched the same lines. Two
+failure classes merge **cleanly** and still break the tree:
 
-`scripts/check_deleted_paths.py` closes that gap. It diffs the pre-rebase
-revision against HEAD, takes the deleted paths, and fails if any *functional*
-file — workflows, `Makefile`, `scripts/*`, `.goreleaser.yml`, `ui/package.json`,
-`go.mod` — still refers to one. The sync runs it after resolving and before
-pushing; `Test` runs it with the resolver tests.
-
-Deliberate deletions are exempt because the checker reads the resolver's
-`DELETED_PATHS`, so intent lives in one place. Prose mentions and undefined
-output paths (`bin/shelley-*`, artifact directories) are ignored on purpose:
-they cannot break a build, and flagging them would train people to bypass the
-check. The files that exist to *describe* deletions are exempt for the same
-reason.
-
-```bash
-python3 scripts/check_deleted_paths.py --base <pre-rebase-revision>
-```
-
-If it fails after an upstream change, the fix is to update the reference, not
-to silence the check.
-
-## A green sync can still ship a broken tree
-
-Two failure classes merge **cleanly** — no conflict, no deleted file — so the
-conflict resolver and the deleted-path checker both stay silent:
-
-1. **Upstream deletes a file a fork-only file references.** Covered by
-   `scripts/check_deleted_paths.py` (see above).
-2. **Upstream removes a method/type/field that fork code calls.** On 2026-11-04
-   through 06 upstream's `move remaining raw SQL to sqlc` removed
-   `db.Tx.Exec`. The fork's `server/deploy_handlers.go` calls it, but no lines
-   conflicted and no file was deleted, so three nightly syncs rebased
-   *successfully* over a tree that no longer compiled. `Test` failed each
-   morning at `Build all release targets` with
-   `tx.Exec undefined (type *db.Tx has no field or method Exec)`. The fix was
-   one line — `tx.Conn().ExecContext(ctx, ...)` — since `Tx` now embeds `Rx`,
-   whose `Conn()` returns the underlying `*sql.Conn`.
-
-Neither class is detectable by reading conflicts. The only reliable catch is
-**compiling and vetting the rebased tree before pushing it**. The sync does
-that now (`go build ./...` and `go vet ./...` after the rebase, before the
-push), so a semantic break fails the sync instead of shipping a broken `main`
-that only `Test` would catch later.
-
-So the triage order for a red morning is:
-
-- Sync green but **Test red at a build step** → a semantic break like this,
-  not a flaky test and not a merge conflict. Read the compiler error, find the
-  upstream commit that removed the symbol (`git log -S'symbol' -- path`), and
-  update the fork's call site.
-- Sync **red** → a conflict the resolver refused; read `git diff --cc`.
+1. **Upstream deletes a file a fork-only file references.** On 2026-10-28
+   upstream deleted `ui/.nvmrc`; the fork-only `sync-upstream.yml` merged
+   cleanly while still reading it. `scripts/check_deleted_paths.py` diffs the
+   pre-rebase revision against HEAD and fails if a *functional* file
+   (workflows, `Makefile`, `scripts/*`, `.goreleaser.yml`, `ui/package.json`,
+   `go.mod`) still refers to a deleted path. Deliberate deletions come from the
+   resolver's `DELETED_PATHS`. Prose mentions and output paths are ignored, so
+   the check stays credible. Fix the reference; do not silence the check.
+2. **Upstream removes a symbol fork code uses.** On 2026-11-04 to 06 upstream
+   deleted `db.Tx.Exec`; three syncs rebased cleanly over a tree that no
+   longer compiled, and the broken `main` was only caught by Test afterwards.
+   The candidate gate now catches this before `main` moves.
 
 ## Verify before pushing
 
@@ -203,18 +198,15 @@ git worktree add --detach /tmp/shelley-rehearse-DATE FAILED_HEAD_SHA
 # Run rebase and reviewed conflict resolutions there, then inspect the result.
 ```
 
-Rebase `custom` onto current `origin/main`, preserving deploy functionality and
-upstream features. Inspect the server manager/routes, App modal/prop, chat event,
-overflow item, and command-palette action. Textual presence checks can help,
-but do not verify types, runtime behavior, or semantic correctness. Likewise,
-grepping for rule anchors cannot prove a resolver is safe or future-proof.
+Rebase `custom` onto current `origin/main` with the resolver, exactly as the
+sync does, preserving deploy functionality and upstream features. Textual
+presence checks can help, but do not verify types, runtime behavior, or
+semantic correctness; the full checks below do.
 
 ### Toolchain and build order
 
-Use the Node version in `ui/.nvmrc` and pnpm version in
-`ui/package.json` (`packageManager`). Upstream's October 23 toolchain upgrade
-also moved pnpm settings into `ui/pnpm-workspace.yaml`. Keep the fork-only sync
-workflow aligned with those files, not an old hard-coded Node/pnpm version.
+Node and pnpm are pinned in `ui/mise.toml`; run them through
+`scripts/with-node`, as the workflows do, never whatever is on `PATH`.
 
 Build embedded assets before Go tests. Some integration tests execute
 `bin/shelley`, so rebuild the binary too after UI changes or rebases: an old
