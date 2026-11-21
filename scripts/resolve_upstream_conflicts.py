@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Resolve only reviewed additive conflicts in the upstream sync rebase."""
+"""Resolve conflicts in the upstream sync rebase, or refuse.
+
+Most conflicts are two independent changes that touch adjacent lines. Each
+file is re-merged in diff3 form; where at most one side edited a hunk's base
+and the other only inserted around it, the two compose (resolve_hunk). Only
+edit-vs-edit hunks need a rule, and only for the few files listed below;
+anything else refuses, and the sync stops without pushing. Composed results
+are then held to the full Test workflow before they can reach main.
+"""
 
 import re
 from pathlib import Path
 import subprocess
-import sys
 
 
 # Files this fork deletes on purpose. Upstream keeps editing them, so every
@@ -13,34 +20,13 @@ DELETED_PATHS = {
     ".github/workflows/publish-version-metadata.yml",
 }
 
-KNOWN_PATHS = {
-    "README.md",
-    "go.mod",
-    "go.sum",
-    "server/server.go",
-    "ui/src/vue/App.vue",
-    "ui/src/vue/components/ChatInterface.vue",
-    "ui/src/vue/components/ChatOverflowMenu.vue",
-    "ui/src/vue/components/CommandPalette.vue",
-    ".github/workflows/release.yml",
-    ".github/workflows/test.yml",
-    ".github/workflows/sync-upstream.yml",
-}
+# Files whose conflicts have ownership semantics a union would get wrong: the
+# fork owns README.md, and upstream owns every dependency version.
+OWNED_PATHS = {"README.md", "go.mod", "go.sum"}
 
-DEPLOY_ASSIGNMENT = (
-    "s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun"
-)
-APP_HANDLER_SUFFIX = [
-    "            commandPaletteOpen = false;\n",
-    "          }\n",
-    '        "\n',
-]
-APP_MODAL_SUFFIX = [
-    "            focusMessageInputIfUnfocused();\n",
-    "          }\n",
-    '        "\n',
-    "      />\n",
-]
+# Files where both sides have edited the same lines before, each with a rule
+# for exactly the shapes that were reviewed. Everything else must compose.
+KNOWN_PATHS = OWNED_PATHS | {".github/workflows/release.yml"}
 
 
 def marker_content(lines: list[str], start: int) -> tuple[list[str], list[str], int]:
@@ -148,141 +134,6 @@ def resolve_go_mod_hunk(
     return kept
 
 
-def resolve_app_hunk(
-    lines: list[str],
-    ours: list[str],
-    theirs: list[str],
-    after: int,
-) -> tuple[list[str], int]:
-    ours_text, theirs_text = normalized(ours), normalized(theirs)
-
-    handler_prefixes = {
-        (
-            '@open-favicon-emoji-picker="',
-            "() => {",
-            "faviconEmojiPickerOpen = true;",
-        ),
-        (
-            '@open-deploy-modal="',
-            "() => {",
-            "deployModalOpen = true;",
-        ),
-    }
-    if tuple(ours_text) in handler_prefixes and tuple(theirs_text) in handler_prefixes:
-        if lines[after : after + len(APP_HANDLER_SUFFIX)] != APP_HANDLER_SUFFIX:
-            raise ValueError("unknown App.vue command-palette handler conflict")
-        return ours + APP_HANDLER_SUFFIX + theirs + APP_HANDLER_SUFFIX, len(APP_HANDLER_SUFFIX)
-
-    modal_prefixes = {
-        (
-            "<FaviconEmojiPicker",
-            ':is-open="faviconEmojiPickerOpen"',
-            '@close="',
-            "() => {",
-            "faviconEmojiPickerOpen = false;",
-        ),
-        (
-            "<DeployModal",
-            ':is-open="deployModalOpen"',
-            ':suggested-dir="mostRecentCwd ?? undefined"',
-            '@close="',
-            "() => {",
-            "deployModalOpen = false;",
-        ),
-    }
-    if tuple(ours_text) in modal_prefixes and tuple(theirs_text) in modal_prefixes:
-        if lines[after : after + len(APP_MODAL_SUFFIX)] != APP_MODAL_SUFFIX:
-            raise ValueError("unknown App.vue modal conflict")
-        return ours + APP_MODAL_SUFFIX + theirs + APP_MODAL_SUFFIX, len(APP_MODAL_SUFFIX)
-
-    if len(ours_text) == len(theirs_text) == 1:
-        known_declarations = {
-            'import FaviconEmojiPicker from "./components/FaviconEmojiPicker.vue";',
-            'import DeployModal from "./components/DeployModal.vue";',
-            'import McpServersModal from "./components/McpServersModal.vue";',
-            "const faviconEmojiPickerOpen = ref(false);",
-            "const deployModalOpen = ref(false);",
-            "const mcpServersModalOpen = ref(mcpLoginResult.value !== null);",
-        }
-        if ours_text[0] in known_declarations and theirs_text[0] in known_declarations:
-            return ours + theirs, 0
-
-        # Both sides bind an independent optional prop to the chat interface,
-        # e.g. upstream's MCP-servers modal alongside our deploy modal.
-        chat_props = {
-            ':on-open-mcp-servers-modal="() => (mcpServersModalOpen = true)"',
-            ':on-open-deploy-modal="() => (deployModalOpen = true)"',
-        }
-        if ours_text[0] in chat_props and theirs_text[0] in chat_props:
-            return ours + theirs, 0
-
-    raise ValueError("unknown App.vue conflict hunk")
-
-
-def resolve_chat_interface_hunk(ours: list[str], theirs: list[str]) -> list[str]:
-    """Preserve independent chat props, handlers, and the upstream slot."""
-    ours_text, theirs_text = normalized(ours), normalized(theirs)
-    prop_declarations = {
-        "onOpenMcpServersModal?: () => void;",
-        "onOpenDeployModal?: () => void;",
-    }
-    if len(ours_text) == len(theirs_text) == 1:
-        if (
-            ours_text[0] != theirs_text[0]
-            and ours_text[0] in prop_declarations
-            and theirs_text[0] in prop_declarations
-        ):
-            return ours + theirs
-
-        # Upstream emits this event for its new-conversation menu item; our
-        # deployment feature adds a separate event binding at the same point.
-        event_bindings = {
-            '@new-conversation="onNewConversationClick"',
-            '@open-deploy-modal="props.onOpenDeployModal?.()"',
-        }
-        if {ours_text[0], theirs_text[0]} == event_bindings:
-            return ours + theirs
-
-    new_conversation_slot = (
-        ours_text[0:4]
-        == [
-            ">",
-            "<button",
-            'class="btn-new"',
-            ':aria-label="t(\'newConversation\')"',
-        ]
-        and ours_text[-2:] == ["</button>", "</ChatOverflowMenu>"]
-        and '@click="onNewConversationClick"' in ours_text
-        and any(line.startswith("<svg") for line in ours_text)
-    )
-    if new_conversation_slot and theirs_text == [
-        '@open-deploy-modal="props.onOpenDeployModal?.()"',
-        "/>",
-    ]:
-        # Upstream moved the new-conversation button into ChatOverflowMenu's
-        # slot. Keep that slot and add our independent event binding to its
-        # opening tag; the deployment side's self-closing tag is obsolete.
-        return [theirs[0]] + ours
-
-    if (
-        not ours_text
-        and theirs_text.count('@open-deploy-modal="props.onOpenDeployModal?.()"') == 1
-        and set(theirs_text)
-        <= {
-            '@new-conversation="onNewConversationClick"',
-            '@open-deploy-modal="props.onOpenDeployModal?.()"',
-        }
-        and len(set(theirs_text)) == len(theirs_text)
-    ):
-        # ChatOverflowMenu no longer emits new-conversation (upstream moved
-        # that button into the component itself), so only our deploy binding
-        # survives. Dropping the stale one keeps the template honest: an
-        # event that no longer exists must not stay bound.
-        return [line for line in theirs if line.strip().startswith("@open-deploy-modal=")]
-
-    raise ValueError("unknown ChatInterface.vue conflict hunk")
-
-
 def resolve_readme_hunk(
     ours: list[str], theirs: list[str], base_text: str
 ) -> list[str]:
@@ -295,9 +146,9 @@ def resolve_readme_hunk(
 
     Ownership is the invariant instead: the fork's side wins wholesale, and
     resolve_text checks the merged file still looks like the fork's README.
-    The guard here is structural: if upstream introduced a heading that its
-    own pre-rebase README lacked, upstream added a section the fork has never
-    seen, so the sync stops for a human.
+    If upstream introduced a heading its pre-rebase README lacked, it added a
+    section the fork has never seen. That is worth a look but never worth
+    blocking upgrades over, so it is reported as an Actions warning.
     """
     theirs_text = normalized(theirs)
     if not theirs_text:
@@ -314,21 +165,22 @@ def resolve_readme_hunk(
         if re.match(r"^#{1,6} ", line.strip()) and line.strip() not in base_headings
     ]
     if added:
-        raise ValueError(f"upstream added README sections: {added}")
+        print(
+            f"::warning file=README.md::upstream added README sections {added}; "
+            "kept the fork's README, consider porting them",
+            flush=True,
+        )
 
     return theirs
 
 
-def resolve_node_setup_hunk(
-    ours: list[str], theirs: list[str], skip_guarded: bool
-) -> list[str]:
+def resolve_node_setup_hunk(ours: list[str], theirs: list[str]) -> list[str]:
     """Adopt upstream's mise-pinned Node setup, keeping the fork's skip guard.
 
     Upstream replaced the two pinned-action setup steps with one
     `scripts/with-node` step. `ui/.nvmrc` no longer exists there, so the fork's
     copy of the old steps is stale by construction. Keep upstream's step and
-    re-apply the fork's release-skip condition; in the sync and test workflows
-    there is no such condition, so keep the step as-is.
+    re-apply the fork's release-skip condition.
     """
     # Accept only upstream's reviewed step: name, `run: |`, the with-node call,
     # and the GITHUB_PATH append. Anything else stops the sync.
@@ -340,39 +192,23 @@ def resolve_node_setup_hunk(
         or not normalized(ours)[3].endswith('>> "$GITHUB_PATH"')
     ):
         raise ValueError("unknown Node setup conflict hunk")
-    if skip_guarded:
-        skip = "if: steps.version.outputs.skip != 'true'"
-        pinned = [
-            "- name: Set up pnpm",
-            skip,
-            "uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0",
-            "with:",
-            "package_json_file: ui/package.json",
-            "- name: Set up Node.js",
-            skip,
-            "uses: actions/setup-node@v4",
-            "with:",
-            "node-version-file: ui/.nvmrc",
-            "cache: 'pnpm'",
-            "cache-dependency-path: ui/pnpm-lock.yaml",
-        ]
-    else:
-        pinned = [
-            "- name: Set up pnpm",
-            "uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0",
-            "with:",
-            "package_json_file: ui/package.json",
-            "- name: Set up Node.js",
-            "uses: actions/setup-node@v4",
-            "with:",
-            "node-version-file: ui/.nvmrc",
-            "cache: 'pnpm'",
-            "cache-dependency-path: ui/pnpm-lock.yaml",
-        ]
+    skip = "if: steps.version.outputs.skip != 'true'"
+    pinned = [
+        "- name: Set up pnpm",
+        skip,
+        "uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0",
+        "with:",
+        "package_json_file: ui/package.json",
+        "- name: Set up Node.js",
+        skip,
+        "uses: actions/setup-node@v4",
+        "with:",
+        "node-version-file: ui/.nvmrc",
+        "cache: 'pnpm'",
+        "cache-dependency-path: ui/pnpm-lock.yaml",
+    ]
     if normalized(theirs) != pinned:
         raise ValueError("unexpected fork Node setup steps")
-    if not skip_guarded:
-        return ours
     indent = " " * (len(ours[0]) - len(ours[0].lstrip()))
     return [ours[0], indent + "  " + pinned[1] + "\n"] + ours[1:]
 
@@ -421,128 +257,110 @@ def resolve_release_workflow_hunk(ours: list[str], theirs: list[str]) -> list[st
     raise ValueError("unknown release.yml conflict hunk")
 
 
-def resolve_chat_overflow_menu_hunk(ours: list[str], theirs: list[str]) -> list[str]:
-    """Keep the deploy action, but not the stale menu block around it.
+class NotAdditive(ValueError):
+    """A conflict where both sides edited the same base lines."""
 
-    Upstream moved version checking below the preferences. The deploy commit
-    still carries the old check-version item and old preferences boundary in
-    this hunk, so only its divider and deploy button are safe to transplant.
+
+def around(side: list[str], base: list[str]) -> tuple[list[str], list[str]] | None:
+    """Split `side` into lines added before and after an untouched `base`.
+
+    Returns None when `side` edited the base. With an empty base the whole
+    side is an insertion at the hunk's anchor. A base that occurs more than
+    once in `side` is ambiguous and treated as edited.
     """
-    expected = [
-        '<div class="overflow-menu-divider" />',
-        '<button class="overflow-menu-item" @click="onDeploy">',
-        '<i class="pi pi-upload chat-menu-icon" aria-hidden="true" />',
-        "Deploy to new exe.dev VM…",
-        "</button>",
-        '<div class="overflow-menu-divider" />',
-        '<button class="overflow-menu-item" @click="onCheckVersion">',
-        '<i class="pi pi-refresh chat-menu-icon" aria-hidden="true" />',
-        '{{ t("checkForNewVersion") }}',
-        '<span v-if="hasUpdate" class="version-menu-dot" />',
-        '<span class="overflow-menu-shortcut"',
-        '><kbd>{{ menuShortcutLabel("checkVersion") }}</kbd></span',
-        ">",
-        "</button>",
-        "<!-- Compact view/theme/notification controls -->",
-    ]
-    if not normalized(ours) and normalized(theirs) == expected:
-        # Keep the deploy action and its leading divider. The upstream side
-        # after the conflict already supplies the preferences divider, and
-        # its current check-version action appears later in the menu.
-        return theirs[:6]
-    raise ValueError("unknown ChatOverflowMenu.vue conflict hunk")
-
-
-def resolve_palette_hunk(
-    lines: list[str],
-    merged: list[str],
-    ours: list[str],
-    theirs: list[str],
-    after: int,
-) -> tuple[list[str], int]:
-    ours_text, theirs_text = normalized(ours), normalized(theirs)
-    emit_signatures = {
-        '(e: "open-favicon-emoji-picker"): void;',
-        '(e: "open-deploy-modal"): void;',
-    }
-    if len(ours_text) == len(theirs_text) == 1:
-        if ours_text[0] in emit_signatures and theirs_text[0] in emit_signatures:
-            return ours + theirs, 0
-
-    action_signatures = {
-        "favicon": (
-            'id: "favicon-emoji",',
-            'title: t("faviconEmoji"),',
-            'emit("open-favicon-emoji-picker");',
-        ),
-        "deploy": (
-            'id: "deploy-to-vm",',
-            'title: "Deploy to new exe.dev VM",',
-            'emit("open-deploy-modal");',
-        ),
-    }
-
-    def action_kind(content: list[str]) -> str | None:
-        text = "\n".join(normalized(content))
-        for kind, signature in action_signatures.items():
-            if all(part in text for part in signature):
-                return kind
+    if not base:
+        return side, []
+    n = len(base)
+    hits = [k for k in range(len(side) - n + 1) if side[k : k + n] == base]
+    if len(hits) != 1:
         return None
-
-    kinds = (action_kind(ours), action_kind(theirs))
-    if set(kinds) == {"favicon", "deploy"}:
-        if not merged or merged[-1] != "  items.push({\n":
-            raise ValueError("unknown CommandPalette.vue action conflict prefix")
-        if after >= len(lines) or lines[after] != "  });\n":
-            raise ValueError("unknown CommandPalette.vue action conflict suffix")
-        opener = merged.pop()
-        closer = lines[after]
-        replacement = [opener] + ours + [closer, "\n", opener] + theirs + [closer]
-        return replacement, 1
-
-    raise ValueError("unknown CommandPalette.vue conflict hunk")
+    return side[: hits[0]], side[hits[0] + n :]
 
 
-ASSIGNMENT_RE = re.compile(r"^s\.(?P<field>[A-Za-z0-9_]+) = \S.*$")
+def resolve_hunk(ours: list[str], base: list[str], theirs: list[str]) -> list[str]:
+    """Compose a diff3 hunk when at most one side edited the base.
 
-
-def resolve_server_hunk(
-    ours: list[str], theirs: list[str], base_text: str
-) -> list[str]:
-    """Keep upstream edits and the deploy commit's two reviewed additions.
-
-    Rebase HEAD is upstream. Stage 1 is the replayed commit's parent, so a
-    line unchanged from stage 1 is inherited context, not a fork addition.
-    In particular, never resurrect an import upstream deliberately removed.
+    A side that kept the base intact only inserted lines around it, and those
+    insertions apply unchanged on top of whatever the other side did to the
+    base. Upstream's insertions come first, so the result is deterministic.
     """
-    upstream, fork = normalized(ours), normalized(theirs)
-    content = upstream + fork
-    if not content:
-        raise ValueError("empty server/server.go conflict")
-    imports = all(re.fullmatch(r'"[A-Za-z0-9_./-]+"', line) for line in content)
-    assignments = all(ASSIGNMENT_RE.fullmatch(line) for line in content)
-    if not imports and not assignments:
-        raise ValueError("unknown server/server.go conflict")
-    if assignments:
-        for side in (upstream, fork):
-            fields = [ASSIGNMENT_RE.fullmatch(line)["field"] for line in side]
-            if len(set(fields)) != len(fields):
-                raise ValueError("multiple assignments to the same field")
-        if any(
-            ASSIGNMENT_RE.fullmatch(line)["field"] == "deployManager"
-            and line != DEPLOY_ASSIGNMENT
-            for line in content
-        ):
-            raise ValueError("server/server.go disagrees about s.deployManager")
+    if normalized(ours) == normalized(theirs):
+        return ours
+    up, fork = around(ours, base), around(theirs, base)
+    if up and fork:
+        return up[0] + fork[0] + base + up[1] + fork[1]
+    if fork:
+        return fork[0] + ours + fork[1]
+    if up:
+        return up[0] + theirs + up[1]
+    raise NotAdditive("both sides edited the same lines")
 
-    addition = '"shelley.exe.dev/server/deploy"' if imports else DEPLOY_ASSIGNMENT
-    base = set(normalized(base_text.splitlines()))
-    if any(line != addition and line not in base for line in fork):
-        raise ValueError("unreviewed fork addition in server/server.go")
-    kept = [line for line in ours if line.strip()]
-    if addition in fork and addition not in upstream:
-        kept.extend(line for line in theirs if line.strip() == addition)
-    return kept
+
+def resolve_additive(diff3: str) -> str:
+    """Resolve every hunk of `git merge-file --diff3` output with resolve_hunk.
+
+    Unlike the zealous two-way markers in the worktree, a diff3 hunk carries
+    each side's whole change and the base lines it replaced, which is what
+    tells an insertion apart from an edit.
+    """
+    lines = diff3.splitlines(keepends=True)
+    merged: list[str] = []
+    i = 0
+    while i < len(lines):
+        if not lines[i].startswith("<<<<<<< "):
+            merged.append(lines[i])
+            i += 1
+            continue
+        sections: list[list[str]] = [[], [], []]
+        part = 0
+        i += 1
+        while True:
+            if i == len(lines):
+                raise ValueError("unterminated conflict")
+            line = lines[i]
+            i += 1
+            if part == 0 and line.startswith("||||||| "):
+                part = 1
+            elif part == 1 and line == "=======\n":
+                part = 2
+            elif part == 2 and line.startswith(">>>>>>> "):
+                break
+            else:
+                sections[part].append(line)
+        if part != 2:
+            raise ValueError("malformed diff3 conflict")
+        merged.extend(resolve_hunk(*sections))
+    return "".join(merged)
+
+
+def diff3_merge(name: str) -> str:
+    """Re-merge a conflicted path's three index stages in diff3 style."""
+    staged = {
+        fields.split()[2]: fields.split()[1]
+        for fields in subprocess.check_output(
+            ["git", "ls-files", "--unmerged", "--", name], text=True
+        ).splitlines()
+    }
+    if set(staged) != {"1", "2", "3"}:
+        raise NotAdditive("not a both-modified content conflict")
+    paths = []
+    for stage in ("2", "1", "3"):
+        blob = subprocess.check_output(["git", "cat-file", "blob", staged[stage]])
+        if b"\0" in blob:
+            raise NotAdditive("binary file")
+        path = Path(subprocess.check_output(["mktemp"], text=True).strip())
+        path.write_bytes(blob)
+        paths.append(str(path))
+    result = subprocess.run(
+        ["git", "merge-file", "-p", "--diff3", "-L", "upstream", "-L", "base", "-L", "fork", *paths],
+        capture_output=True,
+        text=True,
+    )
+    for path in paths:
+        Path(path).unlink()
+    if result.returncode < 0 or result.returncode > 127:
+        raise ValueError(f"git merge-file failed: {result.stderr.strip()}")
+    return result.stdout
 
 
 def resolve_text(name: str, text: str, base_text: str = "") -> str:
@@ -560,43 +378,27 @@ def resolve_text(name: str, text: str, base_text: str = "") -> str:
         if not normalized(ours) and not normalized(theirs):
             raise ValueError(f"empty conflict in {name}")
 
-        if name == "server/server.go":
-            replacement, consumed = resolve_server_hunk(ours, theirs, base_text), 0
-        elif name == "README.md":
-            replacement, consumed = resolve_readme_hunk(ours, theirs, base_text), 0
+        if name == "README.md":
+            replacement = resolve_readme_hunk(ours, theirs, base_text)
         elif name == "go.sum":
-            replacement, consumed = resolve_go_sum_hunk(ours, theirs), 0
+            replacement = resolve_go_sum_hunk(ours, theirs)
         elif name == "go.mod":
-            replacement, consumed = resolve_go_mod_hunk(ours, theirs, base_text), 0
-        elif name == "ui/src/vue/App.vue":
-            replacement, consumed = resolve_app_hunk(lines, ours, theirs, after)
-        elif name == "ui/src/vue/components/ChatInterface.vue":
-            replacement, consumed = resolve_chat_interface_hunk(ours, theirs), 0
+            replacement = resolve_go_mod_hunk(ours, theirs, base_text)
         elif name == ".github/workflows/release.yml":
             try:
-                replacement = resolve_node_setup_hunk(ours, theirs, skip_guarded=True)
+                replacement = resolve_node_setup_hunk(ours, theirs)
             except ValueError:
                 replacement = resolve_release_workflow_hunk(ours, theirs)
-            consumed = 0
-        elif name in (
-            ".github/workflows/test.yml",
-            ".github/workflows/sync-upstream.yml",
-        ):
-            replacement, consumed = resolve_node_setup_hunk(ours, theirs, skip_guarded=False), 0
-        elif name == "ui/src/vue/components/ChatOverflowMenu.vue":
-            replacement, consumed = resolve_chat_overflow_menu_hunk(ours, theirs), 0
-        elif name == "ui/src/vue/components/CommandPalette.vue":
-            replacement, consumed = resolve_palette_hunk(lines, merged, ours, theirs, after)
         else:
             raise ValueError(f"unsupported conflict path: {name}")
 
-        if name in ("server/server.go", "go.mod", "go.sum"):
+        if name in ("go.mod", "go.sum"):
             for line in replacement:
                 if line not in merged:
                     merged.append(line)
         else:
             merged.extend(replacement)
-        i = after + consumed
+        i = after
 
     result = "".join(merged)
     if name == "README.md":
@@ -613,14 +415,27 @@ def main() -> None:
     conflicts = subprocess.check_output(
         ["git", "diff", "--name-only", "--diff-filter=U"], text=True
     ).splitlines()
-    if not conflicts or any(
-        name not in KNOWN_PATHS and name not in DELETED_PATHS for name in conflicts
-    ):
-        print("Unexpected rebase conflicts:", *conflicts, sep="\n", file=sys.stderr)
-        raise SystemExit(1)
+    if not conflicts:
+        raise SystemExit("rebase stopped without a conflicted path")
 
     for name in conflicts:
         path = Path(name)
+        if name not in OWNED_PATHS and name not in DELETED_PATHS:
+            try:
+                path.write_text(resolve_additive(diff3_merge(name)))
+                if name.endswith(".go"):
+                    # Sorts imports both sides added, and refuses a
+                    # composition that does not parse.
+                    if subprocess.run(["gofmt", "-w", name]).returncode:
+                        raise ValueError("the composed file is not valid Go")
+                print(f"{name}: composed independent changes")
+                subprocess.run(["git", "add", "--", name], check=True)
+                continue
+            except NotAdditive as error:
+                if name not in KNOWN_PATHS:
+                    raise SystemExit(f"{name}: {error}; no reviewed rule applies") from error
+            except ValueError as error:
+                raise SystemExit(f"{name}: {error}") from error
         if name in DELETED_PATHS:
             stages = {
                 line.split()[2]
@@ -636,15 +451,13 @@ def main() -> None:
             continue
         try:
             base_text = ""
-            if name in ("server/server.go", "README.md", "go.mod"):
+            if name in ("README.md", "go.mod"):
                 base_text = subprocess.check_output(
                     ["git", "show", f":1:{name}"], text=True
                 )
             path.write_text(resolve_text(name, path.read_text(), base_text))
         except ValueError as error:
             raise SystemExit(f"{name}: {error}") from error
-        if name == "server/server.go":
-            subprocess.run(["gofmt", "-w", name], check=True)
         subprocess.run(["git", "add", "--", name], check=True)
 
     if "go.sum" in conflicts:

@@ -2,9 +2,15 @@ name: Sync upstream & release
 
 # Keeps shelley-playground fresh: every day at 03:00 UTC (and on demand),
 # fetch upstream boldsoftware/shelley main, rebase the playground commits
-# onto it, and publish a GitHub release with cross-compiled binaries via
-# goreleaser. A rebased push runs Test and then Release. If upstream hasn't
-# moved, release this commit only when its version tag does not exist.
+# onto it, and publish. The rebased tree is pushed to the sync-candidate
+# branch and must pass the Test workflow there before it becomes main, so an
+# automatic conflict resolution can never ship a broken main; a candidate
+# that fails stays on that branch for inspection. Promoting main runs Test
+# and then Release as for any push. If upstream hasn't moved, release this
+# commit only when its version tag does not exist.
+#
+# Any failure opens (or comments on) one "sync-failure" issue, which the next
+# successful sync closes, so a stuck sync is never silent.
 
 on:
   schedule:
@@ -13,14 +19,19 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 concurrency:
   group: playground-upstream-sync
   cancel-in-progress: false
 
 jobs:
-  sync-and-release:
+  rebase:
     runs-on: ubuntu-latest
+    outputs:
+      rebased: ${{ steps.check.outputs.rebased }}
+      main: ${{ steps.check.outputs.main }}
+      candidate: ${{ steps.candidate.outputs.sha }}
     steps:
       - name: Checkout playground main
         uses: actions/checkout@v4
@@ -46,6 +57,7 @@ jobs:
         id: check
         run: |
           set -e
+          echo "main=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
           UPSTREAM_TIP=$(git rev-parse upstream/main)
           BASE=$(git merge-base HEAD upstream/main)
           if [ "$UPSTREAM_TIP" = "$BASE" ]; then
@@ -64,23 +76,30 @@ jobs:
           set -euo pipefail
 
           RESOLVER="$RUNNER_TEMP/resolve_upstream_conflicts.py"
+          REPORT="$RUNNER_TEMP/sync-report.md"
           cp scripts/resolve_upstream_conflicts.py "$RESOLVER"
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_resolve_upstream_conflicts.py
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_check_deleted_paths.py
           BASE=$(git rev-parse HEAD)
 
-          resolve_known_conflicts() {
-            python3 "$RESOLVER"
-          }
-
-          if GIT_EDITOR=true git rebase upstream/main; then
-            :
-          else
+          if ! GIT_EDITOR=true git rebase upstream/main; then
             while true; do
-              if ! resolve_known_conflicts; then
-                # Preserve rejected hunks in the Actions log so a new
-                # conflict shape can be reviewed without reproducing the run.
-                git diff --cc
+              if ! python3 "$RESOLVER" 2> "$RUNNER_TEMP/resolver.err"; then
+                cat "$RUNNER_TEMP/resolver.err" >&2
+                {
+                  echo "The resolver refused a conflict while replaying \`$(git log -1 --format='%h %s' REBASE_HEAD)\`:"
+                  echo
+                  echo '```'
+                  cat "$RUNNER_TEMP/resolver.err"
+                  echo '```'
+                  echo
+                  echo '<details><summary><code>git diff --cc</code></summary>'
+                  echo
+                  echo '```diff'
+                  git diff --cc | head -c 40000
+                  echo '```'
+                  echo '</details>'
+                } > "$REPORT"
                 git rebase --abort
                 exit 1
               fi
@@ -99,42 +118,71 @@ jobs:
           python3 scripts/check_deleted_paths.py --base "$BASE"
           git diff --check
 
-      - name: Verify the rebased tree compiles
+      - name: Push the rebased candidate
+        id: candidate
         if: steps.check.outputs.rebased == 'true'
         run: |
-          set -euo pipefail
-          # A rebase can succeed while upstream removed a method a fork-only
-          # file still calls: no lines conflict and no file is deleted, so the
-          # checks above stay silent. On 2026-11-04 through 06 the sync rebased
-          # cleanly over a db.Tx whose Exec method upstream had deleted, and
-          # server/deploy_handlers.go stopped compiling. Compiling here fails
-          # the sync instead of shipping a broken main that only Test catches.
-          dirs="$(scripts/with-node)"
-          echo "${dirs//:/$'\n'}" >> "$GITHUB_PATH"
-          (cd ui && pnpm install --frozen-lockfile && pnpm run build)
-          for dir in templates/*/; do
-            name=$(basename "$dir")
-            tar -czf "templates/$name.tar.gz" -C "templates/$name" --exclude='.DS_Store' .
-          done
-          make exe-scroll-all
-          go build ./...
-          go vet ./...
-
-      - name: Push rebased main
-        if: steps.check.outputs.rebased == 'true'
-        run: |
-          # The rebase rewrites history, so this is never a fast-forward.
           # The sync token has the Workflows permission required when upstream
           # commits change .github/workflows files.
-          # --force-with-lease is safe: it only succeeds if remote main hasn't
-          # changed since we fetched it (no clobbering of others' work).
-          git push --force-with-lease origin HEAD:main
+          git push --force origin HEAD:refs/heads/sync-candidate
+          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Upload failure report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-report
+          path: ${{ runner.temp }}/sync-report.md
+          if-no-files-found: ignore
+
+  # Compiling alone is not enough: an automatic resolution must pass exactly
+  # what a push to main would be tested with.
+  test:
+    needs: rebase
+    if: needs.rebase.outputs.rebased == 'true'
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ needs.rebase.outputs.candidate }}
+
+  publish:
+    needs: [rebase, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.rebase.outputs.candidate }}
+          fetch-depth: 0
+          token: ${{ secrets.PLAYGROUND_SYNC_TOKEN }}
+
+      - name: Promote the candidate to main
+        run: |
+          # The rebase rewrites history, so this is never a fast-forward. The
+          # lease only succeeds if main is still the commit the sync rebased,
+          # so a push made while the candidate was tested is never clobbered.
+          git push --force-with-lease=main:${{ needs.rebase.outputs.main }} \
+            origin ${{ needs.rebase.outputs.candidate }}:refs/heads/main
+
+  release:
+    # A rebased push triggers Test, which triggers release.yml. Releasing
+    # here as well would race that workflow for the same tag.
+    needs: rebase
+    if: needs.rebase.outputs.rebased != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout playground main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PLAYGROUND_SYNC_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Check if release needed
         id: release-check
-        # A rebased push triggers Test, which triggers release.yml. Releasing
-        # here as well would race that workflow for the same tag.
-        if: steps.check.outputs.rebased != 'true'
         run: |
           set -e
           # Generate the playground tag (same scheme as upstream).
@@ -203,7 +251,56 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Notify on conflict
-        if: ${{ failure() && steps.rebase.outcome == 'failure' }}
+  report:
+    needs: [rebase, test, publish, release]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Download failure report
+        if: needs.rebase.result == 'failure'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-report
+
+      - name: Open, update, or close the sync-failure issue
         run: |
-          echo "::error::Automatic rebase onto upstream/main hit an unsupported conflict. Rebase manually: git fetch upstream main && git rebase upstream/main, resolve, then push."
+          set -euo pipefail
+          stage=""
+          case "${{ needs.rebase.result }}" in
+            failure|cancelled) stage="rebasing onto upstream" ;;
+          esac
+          case "${{ needs.test.result }}" in
+            failure|cancelled) stage="testing the rebased candidate (it is kept on the sync-candidate branch)" ;;
+          esac
+          case "${{ needs.publish.result }}" in
+            failure|cancelled) stage="promoting the candidate to main (did main move during the sync?)" ;;
+          esac
+          case "${{ needs.release.result }}" in
+            failure|cancelled) stage="releasing the unchanged main" ;;
+          esac
+          gh label create sync-failure --color B60205 \
+            --description "The nightly upstream sync needs attention" 2>/dev/null || true
+          issue=$(gh issue list --label sync-failure --state open --json number --jq '.[0].number // empty')
+          if [ -z "$stage" ]; then
+            if [ -n "$issue" ]; then
+              gh issue close "$issue" --comment "Resolved: the sync succeeded in $RUN_URL."
+            fi
+            exit 0
+          fi
+          {
+            echo "The upstream sync failed while **$stage** on $(date -u +%F): $RUN_URL"
+            echo
+            if [ -f sync-report.md ]; then cat sync-report.md; fi
+            echo
+            echo 'See docs/maintaining-the-fork.md for triage.'
+          } > body.md
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body-file body.md
+          else
+            gh issue create --title "Upstream sync is failing" --label sync-failure --body-file body.md
+          fi
