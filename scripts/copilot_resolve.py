@@ -63,6 +63,8 @@ commit was written against, after `=======` the fork commit's version, ending
 with `>>>>>>>`. A file both sides created has no `|||||||` section. When
 upstream has adopted the fork's change, keeping upstream's version is right;
 if that leaves the fork commit with nothing to add, it is dropped.
+Never drop a flag or argument upstream added, even when re-applying the
+fork's change to that line.
 {listing}
 
 What the fork commit changed in these files:
