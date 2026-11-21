@@ -22,8 +22,10 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
-MAX_AI_CREDITS = "25"
+# Copilot CLI accepts no cap below 30.
+MAX_AI_CREDITS = "50"
 CONTEXT_LIMIT = 40_000
 MARKER = re.compile(r"^(<{7}|\|{7}|={7}|>{7})( |$)", re.M)
 TOKEN = re.compile(r"\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}")
@@ -127,15 +129,19 @@ def main() -> None:
     before = (set(git("diff", "--name-only").split()), set(git("ls-files", "--others", "--exclude-standard").split()))
     upstream = {name: git("show", f":2:{name}") for name in files}
 
+    usage = Path(tempfile.mkdtemp()) / "usage.json"
     command = [
         "copilot", "-p", prompt(files), "--silent", "--no-ask-user", "--no-auto-update",
         "--no-custom-instructions", "--disable-builtin-mcps", "--disallow-temp-dir",
-        "--max-ai-credits", MAX_AI_CREDITS, "--allow-tool", "read",
+        "--max-ai-credits", MAX_AI_CREDITS, "--usage-output-file", str(usage),
+        "--allow-tool", "read",
         "--deny-tool", "shell", "--deny-tool", "url", "--deny-tool", "memory",
     ]
     for name in files:
         command += ["--allow-tool", f"write({root / name})"]
     result = subprocess.run(command, capture_output=True, text=True, timeout=900)
+    spent = usage.read_text().strip() if usage.exists() else "(not reported)"
+    print(f"Copilot usage: {spent[:1000]}", file=sys.stderr)
     if result.returncode:
         raise SystemExit(f"Copilot CLI failed ({result.returncode}): {result.stderr.strip()[-2000:]}")
     try:
@@ -154,6 +160,7 @@ def main() -> None:
             out.write(f"Copilot's resolution of `{name}`, compared with upstream's version:\n\n")
             out.write(f"```diff\n{clip(diff)}```\n\n")
         out.write(f"Copilot's summary:\n\n{result.stdout.strip()}\n\n")
+        out.write(f"<details><summary>Usage</summary>\n\n```json\n{spent[:4000]}\n```\n</details>\n\n")
     subprocess.run(["git", "add", "--", *files], check=True)
     print(f"Copilot resolved: {' '.join(files)}")
 

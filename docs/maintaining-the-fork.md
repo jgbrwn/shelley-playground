@@ -211,7 +211,7 @@ Copilot is treated as untrusted output in a public repository:
 
 - It may read the repository and write **only the conflicted files**. Shell,
   URLs, memory and the built-in MCP servers are denied, and each session is
-  capped at 25 AI credits.
+  capped at 50 AI credits (the CLI's minimum is 30), and actual usage is recorded in each report.
 - The checkout persists no credentials, and only the push step sees the push
   token. The Copilot token needs no repository access at all.
 - Its output is checked independently: only the conflicted files changed, no
