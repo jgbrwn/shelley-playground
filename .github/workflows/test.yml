@@ -7,6 +7,13 @@ on:
   pull_request:
     branches:
       - main
+  # The upstream sync runs this workflow on its rebased candidate before
+  # promoting it to main, so an automatic merge is held to the same bar.
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
 
 jobs:
   test:
@@ -14,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -33,11 +42,6 @@ jobs:
         run: |
           git config --global user.email "test@example.com"
           git config --global user.name "Test User"
-
-      - name: Test upstream conflict resolver
-        run: |
-          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_resolve_upstream_conflicts.py
-          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_check_deleted_paths.py
 
       - name: Install UI dependencies
         run: |
@@ -71,6 +75,16 @@ jobs:
 
       - name: Fetch embedded exe-scroll
         run: make exe-scroll-all
+
+      # Fork-only checks, kept in one step to stay one insertion in a file
+      # upstream also edits. The UI build and unit tests do not type-check,
+      # and an automatically merged sync must not ship a type error.
+      - name: Fork checks
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_resolve_upstream_conflicts.py
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_check_deleted_paths.py
+          (cd ui && pnpm run type-check && pnpm run type-check:vue && pnpm run lint)
+          go vet ./...
 
       - name: Build all release targets
         run: |
