@@ -9,9 +9,12 @@ can never reach `main` and is never silent.
 
 `.github/workflows/sync-upstream.yml`, daily at 03:00 UTC and on demand:
 
-1. **Rebase** the fork's commits onto upstream main. Each conflict goes to
-   `scripts/resolve_upstream_conflicts.py`, which composes it or refuses
-   (see [the resolver](#the-resolver-compose-or-refuse)).
+1. **Rebase** the fork's commits onto upstream main (`scripts/sync_rebase.sh`).
+   Each conflict goes to `scripts/resolve_upstream_conflicts.py`, which
+   composes it or refuses (see [the resolver](#the-resolver-compose-or-refuse)).
+   What it refuses goes to [Copilot](#copilot-for-edit-vs-edit-conflicts)
+   when that is set up. A fork commit left with no changes, because upstream
+   adopted it, is dropped.
 2. **Check** that no fork-only file still references a path upstream deleted
    (`scripts/check_deleted_paths.py`; see below).
 3. **Push the candidate** to the `sync-candidate` branch, and run the full
@@ -34,8 +37,9 @@ also picks up any fix pushed in between.
 
 Start from the `sync-failure` issue: it names the stage that failed.
 
-- **Rebasing** — the resolver refused an edit-vs-edit conflict. Read the
-  reason and the combined diff in the issue. Decide what the result should be,
+- **Rebasing** — the resolver refused an edit-vs-edit conflict, and Copilot
+  was not set up, declined, or produced a result that failed a check (the
+  issue says which). Read the reason and the combined diff in the issue. Decide what the result should be,
   then either rebase by hand or, if this file will keep conflicting the same
   way, add a reviewed rule (see below).
 - **Testing the candidate** — the rebase succeeded but the tree is broken:
@@ -186,6 +190,52 @@ failure classes merge **cleanly** and still break the tree:
    deleted `db.Tx.Exec`; three syncs rebased cleanly over a tree that no
    longer compiled, and the broken `main` was only caught by Test afterwards.
    The candidate gate now catches this before `main` moves.
+
+## Copilot for edit-vs-edit conflicts
+
+When both sides edited the same lines, a judgement is needed. If the
+`COPILOT_GITHUB_TOKEN` secret is set, the sync asks Copilot CLI to make it
+(`scripts/copilot_resolve.py`), at most five times per sync. This works on the
+**Copilot Free** plan: Free includes Copilot CLI, while the cloud agent (assign
+an issue to Copilot and it opens a pull request) needs a paid plan.
+
+There is no pull request to approve. A rebase rewrites history, so a PR merge
+would not apply, and approval is the same gate every sync passes: the result
+must pass the full Test workflow on `sync-candidate` before it reaches `main`.
+Each Copilot decision is then posted as a **`sync-ai-resolved`** issue showing
+the resolved files compared with upstream's version, and Copilot's own summary,
+for review after the fact. Close the issue once read. To undo a decision, fix
+it on `main`; the next sync keeps whatever `main` has.
+
+Copilot is treated as untrusted output in a public repository:
+
+- It may read the repository and write **only the conflicted files**. Shell,
+  URLs, memory and the built-in MCP servers are denied, and each session is
+  capped at 25 AI credits.
+- The checkout persists no credentials, and only the push step sees the push
+  token. The Copilot token needs no repository access at all.
+- Its output is checked independently: only the conflicted files changed, no
+  file was created, no markers remain, nothing token-shaped was written, Go
+  passes `gofmt`, YAML and JSON parse. Any failure leaves the conflict for a
+  person, as does Copilot leaving markers when it is unsure, which the prompt
+  asks it to do rather than guess.
+- `scripts/test_copilot_resolve.py` proves each check rejects what it should,
+  using a stand-in for the CLI, so it costs no credits.
+
+**Setup.** Create a fine-grained personal access token on your personal
+account (Settings → Developer settings → Fine-grained tokens) with **no
+repository access** and the account permission **Copilot Requests**. Add it to
+this repository as the Actions secret `COPILOT_GITHUB_TOKEN`. Delete the secret
+to switch Copilot off; the sync then refuses edit-vs-edit conflicts as before.
+
+**Rehearse before relying on it.** The **Copilot rehearsal** workflow
+(Actions → Copilot rehearsal → Run workflow) replays a historical sync with a
+known-correct answer, without pushing anything, and its run summary compares
+each of Copilot's resolutions with what actually shipped. The default replays
+the 2026-10-03 sync, where both sides rewrote a `test.yml` line and upstream
+had adopted two fork commits. Copilot Free uses automatic model selection and
+an unpublished monthly credit allowance, so check its quality and its usage
+(github.com/settings/copilot) before trusting it.
 
 ## Verify before pushing
 
