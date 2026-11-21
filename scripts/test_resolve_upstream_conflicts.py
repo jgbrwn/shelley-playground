@@ -1,10 +1,12 @@
+import contextlib
+import io
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
 
-from resolve_upstream_conflicts import resolve_text
+from resolve_upstream_conflicts import NotAdditive, resolve_hunk, resolve_text
 
 
 def conflict_fixture(text):
@@ -45,15 +47,18 @@ git clone https://github.com/jgbrwn/shelley-playground
         self.assertNotIn("ui/mise.toml", resolved)
         self.assertIn("[shelley.dev](https://shelley.dev/)", resolved)
 
-    def test_readme_aborts_when_upstream_adds_a_section(self):
+    def test_readme_warns_when_upstream_adds_a_section(self):
         base = "# Shelley\n\n[shelley.dev](https://shelley.dev/)\n\n# Installation\n"
         upstream = "[shelley.dev](https://shelley.dev/)\n\n# Installation\n\n# Brand New Section\n"
-        for hunk in (
-            f"<<<<<<< HEAD\n{upstream}=======\n# Forked\n>>>>>>> fork\n",
-            f"{base}\n<<<<<<< HEAD\n{upstream}=======\n# Forked\n>>>>>>> fork\n",
-        ):
-            with self.subTest(hunk=hunk), self.assertRaises(ValueError):
-                resolve_text("README.md", hunk, base)
+        fork = "# Shelley Playground\n\n[shelley.dev](https://shelley.dev/)\n"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            resolved = resolve_text(
+                "README.md", f"<<<<<<< HEAD\n{upstream}=======\n{fork}>>>>>>> fork\n", base
+            )
+        self.assertEqual(resolved, fork)
+        self.assertIn("::warning file=README.md::", out.getvalue())
+        self.assertIn("# Brand New Section", out.getvalue())
         # A heading upstream already had in the pre-rebase file is not new.
         rewritten = (
             "# Shelley Playground\n\n[shelley.dev](https://shelley.dev/)\n"
@@ -94,24 +99,13 @@ git clone https://github.com/jgbrwn/shelley-playground
         self.assertNotIn("ui/.nvmrc", resolved)
         self.assertNotIn("pnpm/action-setup", resolved)
 
-        # test.yml/sync-upstream.yml: the same steps without a guard.
-        unguarded = guarded.replace("          if: steps.version.outputs.skip != 'true'\n", "")
-        for path in (".github/workflows/test.yml", ".github/workflows/sync-upstream.yml"):
-            with self.subTest(path=path):
-                out = resolve_text(
-                    path, f"<<<<<<< HEAD\n{ours}=======\n{unguarded}>>>>>>> fork\n"
-                )
-                self.assertIn("scripts/with-node", out)
-                self.assertNotIn("ui/.nvmrc", out)
-
         # Anything else in that position still stops the sync.
-        for path in (".github/workflows/test.yml", ".github/workflows/release.yml"):
-            with self.subTest(path=path), self.assertRaises(ValueError):
-                resolve_text(
-                    path,
-                    "<<<<<<< HEAD\n- name: Set up Node.js and pnpm\n"
-                    "=======\n- name: Something else\n>>>>>>> fork\n",
-                )
+        with self.assertRaises(ValueError):
+            resolve_text(
+                ".github/workflows/release.yml",
+                "<<<<<<< HEAD\n- name: Set up Node.js and pnpm\n"
+                "=======\n- name: Something else\n>>>>>>> fork\n",
+            )
 
     def test_release_workflow_drops_upstream_headless_shell_steps(self):
         # Upstream keeps editing its headless-shell release steps; the fork
@@ -135,310 +129,6 @@ git clone https://github.com/jgbrwn/shelley-playground
         self.assertNotIn("extract-headless-shell.py --resolve-version", resolved)
         self.assertIn("intentionally omitted from", resolved)
         self.assertIn("- name: Run GoReleaser", resolved)
-
-    def test_chat_interface_drops_stale_new_conversation_binding(self):
-        # ChatOverflowMenu stopped emitting new-conversation, so the deploy
-        # commit's binding for it must not survive the resolution.
-        chat = conflict_fixture('''          @check-version="openVersionModal"
-@@START@@ HEAD
-@@SEPARATOR@@
-          @new-conversation="onNewConversationClick"
-          @open-deploy-modal="props.onOpenDeployModal?.()"
-@@END@@ deploy
-        >
-''')
-        resolved = resolve_text("ui/src/vue/components/ChatInterface.vue", chat)
-        self.assertNotIn("<<<<<<<", resolved)
-        self.assertEqual(
-            resolved.count('@open-deploy-modal="props.onOpenDeployModal?.()"'), 1
-        )
-        self.assertNotIn("@new-conversation=", resolved)
-
-    def test_server_keeps_new_upstream_assignment_alongside_deploy(self):
-        # Today's real hunk: upstream added a new field assignment at the
-        # deploy feature's insertion point.
-        server = conflict_fixture('''func NewServer(s *Server) {
-    s.integrationSkills = newIntegrationSkillCache(logger, currentIntegrationSkillDiscoverer(logger))
-@@START@@ HEAD
-    s.listIntegrations = listCurrentIntegrations
-@@SEPARATOR@@
-    s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun
-@@END@@ deploy
-''')
-        resolved = resolve_text("server/server.go", server)
-        self.assertNotIn("<<<<<<<", resolved)
-        self.assertIn("s.listIntegrations = listCurrentIntegrations", resolved)
-        self.assertIn("s.deployManager = deploy.NewManager(nil)", resolved)
-        # Upstream's line is preserved ahead of the fork's, as in the file.
-        self.assertLess(
-            resolved.index("s.listIntegrations"),
-            resolved.index("s.deployManager"),
-        )
-
-    def test_app_preserves_favicon_and_deploy_features(self):
-        app = conflict_fixture('''<template>
-@@START@@ HEAD
-        @open-favicon-emoji-picker="
-          () => {
-            faviconEmojiPickerOpen = true;
-@@SEPARATOR@@
-        @open-deploy-modal="
-          () => {
-            deployModalOpen = true;
-@@END@@ deploy
-            commandPaletteOpen = false;
-          }
-        "
-@@START@@ HEAD
-      <FaviconEmojiPicker
-        :is-open="faviconEmojiPickerOpen"
-        @close="
-          () => {
-            faviconEmojiPickerOpen = false;
-@@SEPARATOR@@
-      <DeployModal
-        :is-open="deployModalOpen"
-        :suggested-dir="mostRecentCwd ?? undefined"
-        @close="
-          () => {
-            deployModalOpen = false;
-@@END@@ deploy
-            focusMessageInputIfUnfocused();
-          }
-        "
-      />
-@@START@@ HEAD
-import FaviconEmojiPicker from "./components/FaviconEmojiPicker.vue";
-@@SEPARATOR@@
-import DeployModal from "./components/DeployModal.vue";
-@@END@@ deploy
-@@START@@ HEAD
-const faviconEmojiPickerOpen = ref(false);
-@@SEPARATOR@@
-const deployModalOpen = ref(false);
-@@END@@ deploy
-</template>
-''')
-        resolved = resolve_text("ui/src/vue/App.vue", app)
-        self.assertNotIn("<<<<<<<", resolved)
-        for feature in (
-            "@open-favicon-emoji-picker",
-            "@open-deploy-modal",
-            "<FaviconEmojiPicker",
-            "<DeployModal",
-            "FaviconEmojiPicker.vue",
-            "DeployModal.vue",
-            "faviconEmojiPickerOpen",
-            "deployModalOpen",
-        ):
-            self.assertIn(feature, resolved)
-        self.assertEqual(resolved.count("focusMessageInputIfUnfocused();"), 2)
-
-    def test_palette_preserves_both_commands(self):
-        palette = conflict_fixture('''<script>
-@@START@@ HEAD
-  (e: "open-favicon-emoji-picker"): void;
-@@SEPARATOR@@
-  (e: "open-deploy-modal"): void;
-@@END@@ deploy
-  items.push({
-@@START@@ HEAD
-    id: "favicon-emoji",
-    type: "action",
-    title: t("faviconEmoji"),
-    subtitle: t("pickFaviconEmoji"),
-    icon: ICON_SMILE,
-    action: () => {
-      emit("open-favicon-emoji-picker");
-      emit("close");
-    },
-    keywords: ["favicon", "emoji", "icon", "tab", "change", "edit", "customize"],
-@@SEPARATOR@@
-    id: "deploy-to-vm",
-    type: "action",
-    title: "Deploy to new exe.dev VM",
-    subtitle: "Forklift the current project directory onto a fresh VM",
-    icon: ICON_UPLOAD,
-    action: () => {
-      emit("open-deploy-modal");
-      emit("close");
-    },
-    keywords: ["deploy", "forklift", "production", "vm", "exe", "ship", "release"],
-@@END@@ deploy
-  });
-</script>
-''')
-        resolved = resolve_text("ui/src/vue/components/CommandPalette.vue", palette)
-        self.assertNotIn("<<<<<<<", resolved)
-        self.assertIn('(e: "open-favicon-emoji-picker"): void;', resolved)
-        self.assertIn('(e: "open-deploy-modal"): void;', resolved)
-        self.assertEqual(resolved.count("  items.push({"), 2)
-        self.assertEqual(resolved.count('id: "favicon-emoji",'), 1)
-        self.assertEqual(resolved.count('id: "deploy-to-vm",'), 1)
-
-    def test_server_additive_assignments_and_imports(self):
-        server = conflict_fixture('''package server
-import (
-@@START@@ HEAD
-    "skills"
-@@SEPARATOR@@
-    "shelley.exe.dev/server/deploy"
-@@END@@ deploy
-)
-func initServer(s *Server) {
-@@START@@ HEAD
-    s.integrationSkills = newIntegrationSkillCache(logger, currentIntegrationSkillDiscoverer(logger))
-@@SEPARATOR@@
-    s.integrationSkills = discoverIntegrationSkillsAtStartup(logger)
-    s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun
-@@END@@ deploy
-}
-''')
-        resolved = resolve_text(
-            "server/server.go", server,
-            "s.integrationSkills = discoverIntegrationSkillsAtStartup(logger)\n",
-        )
-        self.assertNotIn("<<<<<<<", resolved)
-        self.assertIn('"shelley.exe.dev/server/deploy"', resolved)
-        self.assertIn('"skills"', resolved)
-        self.assertIn("s.integrationSkills = newIntegrationSkillCache", resolved)
-        self.assertIn("s.deployManager = deploy.NewManager(nil)", resolved)
-
-    def test_app_preserves_mcp_and_deploy_props(self):
-        # Upstream's MCP-servers modal and our deploy modal both bind a prop to
-        # the chat interface at the same spot.
-        app = conflict_fixture('''<template>
-          :on-open-models-modal="() => (modelsModalOpen = true)"
-@@START@@ HEAD
-          :on-open-mcp-servers-modal="() => (mcpServersModalOpen = true)"
-@@SEPARATOR@@
-          :on-open-deploy-modal="() => (deployModalOpen = true)"
-@@END@@ deploy
-          :on-open-file-finder="openFileFinder"
-''')
-        resolved = resolve_text("ui/src/vue/App.vue", app)
-        self.assertNotIn("<<<<<<<", resolved)
-        self.assertIn(":on-open-mcp-servers-modal=", resolved)
-        self.assertIn(":on-open-deploy-modal=", resolved)
-        self.assertIn(":on-open-file-finder=", resolved)
-
-    def test_chat_interface_preserves_mcp_and_deploy_props(self):
-        chat = conflict_fixture('''    onOpenModelsModal?: () => void;
-@@START@@ HEAD
-    onOpenMcpServersModal?: () => void;
-@@SEPARATOR@@
-    onOpenDeployModal?: () => void;
-@@END@@ deploy
-    onOpenFileFinder?: () => void;
-''')
-        resolved = resolve_text("ui/src/vue/components/ChatInterface.vue", chat)
-        self.assertNotIn("<<<<<<<", resolved)
-        self.assertIn("onOpenMcpServersModal?: () => void;", resolved)
-        self.assertIn("onOpenDeployModal?: () => void;", resolved)
-        self.assertIn("onOpenFileFinder?: () => void;", resolved)
-
-    def test_chat_interface_keeps_upstream_slot_and_deploy_handler(self):
-        chat = conflict_fixture('''          @check-version="openVersionModal"
-@@START@@ HEAD
-        >
-          <button
-            class="btn-new"
-            :aria-label="t('newConversation')"
-            @click="onNewConversationClick"
-          >
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" class="chat-icon-1rem">
-              <path d="M12 4v16m8-8H4" />
-            </svg>
-          </button>
-        </ChatOverflowMenu>
-@@SEPARATOR@@
-          @open-deploy-modal="props.onOpenDeployModal?.()"
-        />
-@@END@@ deploy
-      </div>
-''')
-        resolved = resolve_text("ui/src/vue/components/ChatInterface.vue", chat)
-        self.assertNotIn("<<<<<<<", resolved)
-        self.assertIn('@open-deploy-modal="props.onOpenDeployModal?.()"', resolved)
-        self.assertIn('class="btn-new"', resolved)
-        self.assertIn("@click=\"onNewConversationClick\"", resolved)
-        self.assertIn("</ChatOverflowMenu>", resolved)
-        self.assertNotIn("        />", resolved)
-
-    def test_chat_interface_preserves_new_conversation_and_deploy_handlers(self):
-        chat = conflict_fixture('''          @check-version="openVersionModal"
-@@START@@ HEAD
-          @new-conversation="onNewConversationClick"
-@@SEPARATOR@@
-          @open-deploy-modal="props.onOpenDeployModal?.()"
-@@END@@ deploy
-        >
-''')
-        resolved = resolve_text("ui/src/vue/components/ChatInterface.vue", chat)
-        self.assertNotIn("<<<<<<<", resolved)
-        self.assertEqual(resolved.count('@new-conversation="onNewConversationClick"'), 1)
-        self.assertEqual(
-            resolved.count('@open-deploy-modal="props.onOpenDeployModal?.()"'), 1
-        )
-
-    def test_chat_interface_rejects_mixed_prop_and_event_conflicts(self):
-        with self.assertRaises(ValueError):
-            resolve_text(
-                "ui/src/vue/components/ChatInterface.vue",
-                "<<<<<<< ours\n"
-                '@new-conversation="onNewConversationClick"\n'
-                "=======\n"
-                "onOpenDeployModal?: () => void;\n"
-                ">>>>>>> theirs\n",
-            )
-        with self.assertRaises(ValueError):
-            resolve_text(
-                "ui/src/vue/components/ChatInterface.vue",
-                "<<<<<<< ours\n"
-                '@new-conversation="onNewConversationClick"\n'
-                "=======\n"
-                '@new-conversation="onNewConversationClick"\n'
-                ">>>>>>> theirs\n",
-            )
-
-    def test_chat_overflow_menu_keeps_deploy_without_stale_menu_items(self):
-        menu = conflict_fixture('''      <button class="overflow-menu-item" @click="onMcpServers">
-        {{ t("mcpServers") }}
-      </button>
-@@START@@ HEAD
-@@SEPARATOR@@
-
-      <div class="overflow-menu-divider" />
-      <button class="overflow-menu-item" @click="onDeploy">
-        <i class="pi pi-upload chat-menu-icon" aria-hidden="true" />
-        Deploy to new exe.dev VM…
-      </button>
-
-      <div class="overflow-menu-divider" />
-      <button class="overflow-menu-item" @click="onCheckVersion">
-        <i class="pi pi-refresh chat-menu-icon" aria-hidden="true" />
-        {{ t("checkForNewVersion") }}
-        <span v-if="hasUpdate" class="version-menu-dot" />
-        <span class="overflow-menu-shortcut"
-          ><kbd>{{ menuShortcutLabel("checkVersion") }}</kbd></span
-        >
-      </button>
-
-      <!-- Compact view/theme/notification controls -->
-@@END@@ deploy
-      <div class="overflow-menu-divider" />
-      <div class="overflow-quick-controls" />
-      <button class="overflow-menu-item" @click="onCheckVersion">
-        {{ t("checkForNewVersion") }}
-      </button>
-''')
-        resolved = resolve_text("ui/src/vue/components/ChatOverflowMenu.vue", menu)
-        self.assertNotIn("<<<<<<<", resolved)
-        self.assertEqual(resolved.count("Deploy to new exe.dev VM…"), 1)
-        self.assertEqual(resolved.count("{{ t(\"checkForNewVersion\") }}"), 1)
-        self.assertEqual(resolved.count('@click="onCheckVersion"'), 1)
-        self.assertNotIn("Compact view/theme/notification controls", resolved)
-        self.assertEqual(resolved.count('<div class="overflow-menu-divider" />'), 2)
 
     def test_go_mod_keeps_upstream_versions_and_fork_edkey(self):
         # Today's real hunk: upstream bumped compress while the replayed
@@ -545,39 +235,6 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
                     f"<<<<<<< HEAD\n{upstream}=======\n{fork}>>>>>>> fork\n",
                 )
 
-    def test_server_drops_only_inherited_imports_removed_by_upstream(self):
-        hunk = conflict_fixture('''import (
-@@START@@ HEAD
-@@SEPARATOR@@
-    "shelley.exe.dev/server/deploy"
-    "shelley.exe.dev/server/diskspace"
-@@END@@ fork
-    "shelley.exe.dev/server/resource"
-)
-''')
-        resolved = resolve_text(
-            "server/server.go", hunk, '"shelley.exe.dev/server/diskspace"\n'
-        )
-        self.assertNotIn("diskspace", resolved)
-        self.assertIn('"shelley.exe.dev/server/deploy"', resolved)
-        self.assertIn('"shelley.exe.dev/server/resource"', resolved)
-        # Without the base proving it is inherited, discarding it is unsafe.
-        with self.assertRaises(ValueError):
-            resolve_text("server/server.go", hunk)
-
-    def test_server_rejects_competing_or_unknown_fork_assignments(self):
-        for ours, theirs in (
-            ("s.other = upstream()", "s.other = fork()"),
-            ("s.deployManager = upstream()", "s.deployManager = fork()"),
-            ("s.other = upstream()", "s.other = one()\ns.other = two()"),
-            ("s.other = one()\ns.other = two()", "s.deployManager = deploy.NewManager(nil)"),
-        ):
-            with self.subTest(ours=ours, theirs=theirs), self.assertRaises(ValueError):
-                resolve_text(
-                    "server/server.go",
-                    f"<<<<<<< HEAD\n{ours}\n=======\n{theirs}\n>>>>>>> fork\n",
-                )
-
     def test_go_sum_rejects_malformed_and_competing_hashes(self):
         a, b = "A" * 43 + "=", "B" * 43 + "="
         for ours, theirs in (
@@ -596,51 +253,59 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
                 f"<<<<<<< HEAD\n=======\nexample.com/mod v1.0.0 h1:{b}\n>>>>>>> fork\n",
             )
 
-    def test_rejects_unknown_hunks_and_paths(self):
-        with self.assertRaises(ValueError):
-            resolve_text(
-                "ui/src/vue/App.vue",
-                "<<<<<<< ours\nconst other = true;\n=======\nconst other = false;\n>>>>>>> theirs\n",
-            )
-        with self.assertRaises(ValueError):
-            resolve_text(
-                "ui/src/vue/Unknown.vue",
-                "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n",
-            )
-        # The fork owns README.md, but only while upstream adds no sections.
-        with self.assertRaises(ValueError):
-            resolve_text(
-                "README.md",
-                "<<<<<<< ours\n=======\nunknown\n>>>>>>> theirs\n",
-            )
-        with self.assertRaises(ValueError):
-            resolve_text(
-                "server/server.go",
-                "<<<<<<< ours\n"
-                "    s.deployManager = deploy.NewManager(nil) // runs persisted on completion via persistRun\n"
-                "=======\n"
-                "    s.deployManager = somethingElse()\n"
-                ">>>>>>> theirs\n",
-            )
-        with self.assertRaises(ValueError):
-            resolve_text(
-                "server/server.go",
-                "<<<<<<< ours\n"
-                "    notAnAssignment()\n"
-                "=======\n"
-                "    s.deployManager = deploy.NewManager(nil)\n"
-                ">>>>>>> theirs\n",
-            )
-        with self.assertRaises(ValueError):
-            resolve_text(
-                "ui/src/vue/components/ChatOverflowMenu.vue",
-                "<<<<<<< ours\nunknown\n=======\nunknown\n>>>>>>> theirs\n",
-            )
-        with self.assertRaises(ValueError):
-            resolve_text(
-                "ui/src/vue/components/ChatInterface.vue",
-                "<<<<<<< ours\n<UnknownSlot />\n=======\n<UnknownProp />\n>>>>>>> theirs\n",
-            )
+    def test_reviewed_rules_refuse_unknown_hunks_and_paths(self):
+        # resolve_text holds only the reviewed edit-vs-edit rules; every other
+        # path is composed by resolve_hunk or refused before reaching it.
+        for name, hunk in (
+            ("ui/src/vue/App.vue", "<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n"),
+            ("README.md", "<<<<<<< ours\n=======\nunknown\n>>>>>>> theirs\n"),
+            (".github/workflows/release.yml", "<<<<<<< ours\na: 1\n=======\na: 2\n>>>>>>> theirs\n"),
+        ):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                resolve_text(name, hunk)
+
+
+class ComposeHunkTest(unittest.TestCase):
+    """resolve_hunk(upstream, base, fork) on whole diff3 hunks."""
+
+    def test_both_inserted_at_one_anchor_keeps_upstream_then_fork(self):
+        self.assertEqual(
+            resolve_hunk(["secrets\n"], [], ["deploy\n"]), ["secrets\n", "deploy\n"]
+        )
+
+    def test_identical_insertions_are_kept_once(self):
+        self.assertEqual(resolve_hunk(["x\n"], [], [" x\n"]), ["x\n"])
+
+    def test_fork_insertion_survives_an_upstream_rewrite(self):
+        # 2026-11: upstream folded two encode lines into writeJSON while the
+        # fork inserted a redaction call before them.
+        base = ["header()\n", "encode()\n"]
+        self.assertEqual(
+            resolve_hunk(["writeJSON()\n"], base, ["redact()\n", *base]),
+            ["redact()\n", "writeJSON()\n"],
+        )
+
+    def test_fork_edit_survives_upstream_insertions(self):
+        self.assertEqual(
+            resolve_hunk(["new()\n", "old()\n", "tail()\n"], ["old()\n"], ["custom()\n"]),
+            ["new()\n", "custom()\n", "tail()\n"],
+        )
+
+    def test_insertions_around_the_base_from_both_sides(self):
+        self.assertEqual(
+            resolve_hunk(["u\n", "b\n"], ["b\n"], ["f\n", "b\n", "g\n"]),
+            ["u\n", "f\n", "b\n", "g\n"],
+        )
+
+    def test_refuses_when_both_sides_edit_the_base(self):
+        with self.assertRaises(NotAdditive):
+            resolve_hunk(["a = 1\n"], ["a = 0\n"], ["a = 2\n"])
+
+    def test_refuses_an_ambiguous_base(self):
+        # The fork's side contains the base twice, so it is unknowable which
+        # copy is the original and which was added.
+        with self.assertRaises(NotAdditive):
+            resolve_hunk(["x\n"], ["}\n"], ["}\n", "}\n"])
 
 
 class GitConflictResolverTest(unittest.TestCase):
@@ -736,6 +401,9 @@ class GitConflictResolverTest(unittest.TestCase):
             git("-c", "core.editor=true", "rebase", "--continue")
 
     def test_server_import_rebase(self):
+        # Upstream deleted an import the fork's commit still carries as
+        # context. Deleting is an edit of the base, while the fork only
+        # inserted around it, so the deletion wins and is never undone.
         resolver = Path(__file__).with_name("resolve_upstream_conflicts.py").resolve()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -775,6 +443,59 @@ class GitConflictResolverTest(unittest.TestCase):
             self.assertIn('"shelley.exe.dev/server/deploy"', staged)
             self.assertIn('"shelley.exe.dev/server/resource"', staged)
             git("-c", "core.editor=true", "rebase", "--continue")
+
+
+    def test_unknown_path_composes_or_refuses(self):
+        resolver = Path(__file__).with_name("resolve_upstream_conflicts.py").resolve()
+        base = "package p\n\nfunc get() {\n\theader()\n\tencode()\n}\n"
+        cases = {
+            "compose": (
+                "package p\n\nfunc get() {\n\twriteJSON()\n}\n",
+                "package p\n\nfunc get() {\n\tredact()\n\theader()\n\tencode()\n}\n",
+                "package p\n\nfunc get() {\n\tredact()\n\twriteJSON()\n}\n",
+            ),
+            "refuse": (
+                "package p\n\nfunc get() {\n\twriteJSON()\n}\n",
+                "package p\n\nfunc get() {\n\theader()\n\tencodeIndented()\n}\n",
+                None,
+            ),
+        }
+        for label, (upstream, fork, want) in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+
+                def git(*args):
+                    return subprocess.run(
+                        ["git", *args], cwd=root, text=True, capture_output=True
+                    )
+
+                git("init", "-q", "-b", "main")
+                git("config", "user.name", "t")
+                git("config", "user.email", "t@example.test")
+                path = root / "pkg" / "unreviewed.go"
+                path.parent.mkdir()
+                path.write_text(base)
+                git("add", ".")
+                git("commit", "-qm", "base")
+                git("checkout", "-qb", "fork")
+                path.write_text(fork)
+                git("commit", "-qam", "fork")
+                git("checkout", "-q", "main")
+                path.write_text(upstream)
+                git("commit", "-qam", "upstream")
+                git("checkout", "-q", "fork")
+                self.assertNotEqual(git("rebase", "main").returncode, 0)
+                result = subprocess.run(
+                    [sys.executable, str(resolver)], cwd=root, text=True, capture_output=True
+                )
+                if want is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("both sides edited the same lines", result.stderr)
+                    self.assertIn("<<<<<<<", path.read_text())
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(path.read_text(), want)
+                    self.assertEqual(git("diff", "--name-only", "--diff-filter=U").stdout, "")
 
 
 if __name__ == "__main__":
