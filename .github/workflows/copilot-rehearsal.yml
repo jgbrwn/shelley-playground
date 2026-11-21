@@ -1,0 +1,88 @@
+name: Copilot rehearsal
+
+# Try Copilot on a real historical conflict whose correct resolution is known,
+# without pushing anything. It replays the sync from release FROM onto the
+# upstream base of release EXPECT, exactly as the nightly sync would, then
+# compares every file Copilot resolved with what EXPECT shipped. Use it to
+# check COPILOT_GITHUB_TOKEN works and to judge Copilot before relying on it.
+#
+# The defaults are the 2026-10-03 -> 10-04 sync: both sides edited the same
+# test.yml line, and upstream had adopted two fork commits.
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: Release tag to replay from
+        default: v0.1320.965251343
+      expect:
+        description: Release tag whose upstream base to rebase onto, and whose files are the expected answer
+        default: v0.1347.932645716
+
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Copilot CLI
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --global @github/copilot@1.0.114
+
+      - name: Replay and compare
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          FROM: ${{ inputs.from }}
+          EXPECT: ${{ inputs.expect }}
+        run: |
+          set -euo pipefail
+          if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
+            echo "::error::Set the COPILOT_GITHUB_TOKEN secret first (see docs/maintaining-the-fork.md)."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/boldsoftware/shelley.git
+          git fetch --quiet upstream main
+          TOOLS="$RUNNER_TEMP/sync-tools"
+          mkdir -p "$TOOLS"
+          cp scripts/sync_rebase.sh scripts/resolve_upstream_conflicts.py scripts/copilot_resolve.py "$TOOLS"
+          git checkout --quiet --detach "$FROM"
+          status=0
+          "$TOOLS/sync_rebase.sh" "$(git merge-base "$EXPECT" upstream/main)" "$RUNNER_TEMP/sync" || status=$?
+          {
+            echo "## Copilot rehearsal: $FROM onto the upstream base of $EXPECT"
+            echo
+            if [ "$status" -ne 0 ]; then
+              echo "The replay did **not** complete."
+              echo
+              cat "$RUNNER_TEMP/sync/sync-report.md"
+            fi
+            if [ -f "$RUNNER_TEMP/sync/ai-resolution.md" ]; then
+              echo "### Copilot's resolutions compared with what $EXPECT shipped"
+              echo
+              for f in $(grep -o 'resolution of `[^`]*`' "$RUNNER_TEMP/sync/ai-resolution.md" | cut -d'`' -f2 | sort -u); do
+                if git diff --quiet HEAD "$EXPECT" -- "$f"; then
+                  echo "- \`$f\`: **identical** to what shipped"
+                else
+                  echo "- \`$f\`: differs from what shipped:"
+                  echo
+                  echo '```diff'
+                  git diff HEAD "$EXPECT" -- "$f" | head -c 20000
+                  echo '```'
+                fi
+              done
+              echo
+              cat "$RUNNER_TEMP/sync/ai-resolution.md"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
