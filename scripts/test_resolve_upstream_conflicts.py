@@ -392,7 +392,7 @@ class GitConflictResolverTest(unittest.TestCase):
             git("checkout", "fork")
             result = git("rebase", "upstream", check=False)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-            subprocess.run([sys.executable, str(resolver)], cwd=root, check=True)
+            subprocess.run([sys.executable, str(resolver)], cwd=root, check=True, capture_output=True)
             self.assertEqual(git("diff", "--name-only", "--diff-filter=U").stdout, "")
             staged = git("show", ":go.mod").stdout
             self.assertIn("compress v1.20.3", staged)
@@ -436,7 +436,7 @@ class GitConflictResolverTest(unittest.TestCase):
             git("checkout", "fork")
             result = git("rebase", "upstream", check=False)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-            subprocess.run([sys.executable, str(resolver)], cwd=root, check=True)
+            subprocess.run([sys.executable, str(resolver)], cwd=root, check=True, capture_output=True)
             self.assertEqual(git("diff", "--name-only", "--diff-filter=U").stdout, "")
             staged = git("show", ":server/server.go").stdout
             self.assertNotIn("diskspace", staged)
