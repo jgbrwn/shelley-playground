@@ -84,5 +84,14 @@ jobs:
               echo
               cat "$RUNNER_TEMP/sync/ai-resolution.md"
             fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          } > "$RUNNER_TEMP/sync/rehearsal.md"
+          cat "$RUNNER_TEMP/sync/rehearsal.md" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$status"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rehearsal
+          path: ${{ runner.temp }}/sync/
+          if-no-files-found: ignore
